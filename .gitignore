@@ -1,0 +1,202 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv/
+.venv*/
+browser_test_env/
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+.pnp
+.pnp.*
+
+# Production builds
+/build
+/dist
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+logs/
+*.log
+
+# Data directories
+data/
+data/*
+*.db
+*.sqlite
+*.sqlite3
+backups/
+*.sql
+
+# Environment files
+.env
+.env.local
+.env.*.local
+.env.*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+coverage/
+test_environment/
+test_results*.json
+*_test_results.json
+*_test_result*.png
+*_test_result*.html
+
+# ML/AI specific
+*.pkl
+*.joblib
+*.h5
+*.hdf5
+*.model
+*.bin
+*.safetensors
+*.onnx
+*.tflite
+*.pt
+*.pth
+*.ckpt
+*.weights
+*.index
+*.meta
+*.data-*
+
+# Vector databases
+*.faiss
+*.index
+*.metadata
+vector_index/
+embeddings/
+
+# Cache
+.cache/
+cache/
+mlflow/
+
+# Temporary files
+*.tmp
+*.temp
+
+# TypeScript
+*.tsbuildinfo
+next-env.d.ts
+
+# Docker
+.dockerignore
+
+# Jupyter
+.ipynb_checkpoints/
+
+# MLflow
+mlruns/
+mlartifacts/
+
+# MinIO/S3 data
+_minio_data/
+.pgdata/
+
+# Reports and documentation
+reports/
+*.json
+!package.json
+!package-lock.json
+!tsconfig.json
+!*.config.json
+*_REPORT.md
+*_ANALYSIS.md
+*_NEWSLETTER.md
+*_PLAN.md
+*_ROADMAP.md
+*_STRATEGY.md
+*_SUMMARY.md
+
+# Archives
+*.zip
+*.tar.gz
+*.rar
+
+# Test files
+*_test.py
+test_*.py
+*_debug*.py
+*_test*.png
+*_test*.html
+debug_*.html
+debug_*.png
+comprehensive_*.py
+final_*.py
+*_comprehensive*.py
+
+# Browser test files
+browser_debug_test.py
+simple_browser_test.py
+headless_debug.py
+frontend_debug.png
+load_data_test.png
+deep_debug_screenshot.png
+test-charts-final.png
+test-training-config.png
+
+# Data files
+*.jsonl
+*.csv
+*.json
+!package.json
+!package-lock.json
+!tsconfig.json
+!*.config.json
+current_data_*.json
+reference_data_*.json
+historical_training_data.jsonl
+production_inference_data.jsonl
+sample_training_data.csv
+new_model_prediction.json
+old_model_prediction.json
+drift_result.json
+
+# Monitoring
+monitoring/grafana/
+monitoring/prometheus/
+
+# Scripts (keep important ones, ignore test scripts)
+scripts/
+!scripts/init_*.sql
+!scripts/setup_*.sh

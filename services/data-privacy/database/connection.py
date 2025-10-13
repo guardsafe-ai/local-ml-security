@@ -1,0 +1,140 @@
+"""
+Data Privacy Service - Database Connection
+Database connection and management
+"""
+
+import logging
+import asyncio
+import asyncpg
+from typing import Optional, Dict, Any
+from utils.config import get_config
+
+logger = logging.getLogger(__name__)
+
+
+class DatabaseManager:
+    """Manages database connections and operations"""
+    
+    def __init__(self):
+        self.config = get_config()
+        self.pool: Optional[asyncpg.Pool] = None
+        self.connection_string = self.config["postgres_url"]
+    
+    async def connect(self) -> None:
+        """Establish database connection pool"""
+        try:
+            self.pool = await asyncpg.create_pool(
+                self.connection_string,
+                min_size=1,
+                max_size=10,
+                command_timeout=60
+            )
+            logger.info("Database connection pool created successfully")
+        except Exception as e:
+            logger.error(f"Failed to create database connection pool: {e}")
+            raise
+    
+    async def disconnect(self) -> None:
+        """Close database connection pool"""
+        if self.pool:
+            await self.pool.close()
+            logger.info("Database connection pool closed")
+    
+    async def execute_query(self, query: str, *args) -> list:
+        """Execute a query and return results"""
+        if not self.pool:
+            raise Exception("Database not connected")
+        
+        async with self.pool.acquire() as connection:
+            try:
+                results = await connection.fetch(query, *args)
+                return [dict(row) for row in results]
+            except Exception as e:
+                logger.error(f"Query execution failed: {e}")
+                raise
+    
+    async def execute_command(self, command: str, *args) -> str:
+        """Execute a command and return status"""
+        if not self.pool:
+            raise Exception("Database not connected")
+        
+        async with self.pool.acquire() as connection:
+            try:
+                result = await connection.execute(command, *args)
+                return result
+            except Exception as e:
+                logger.error(f"Command execution failed: {e}")
+                raise
+    
+    async def initialize_schema(self) -> None:
+        """Initialize database schema for data privacy"""
+        try:
+            # Create data_privacy schema if it doesn't exist
+            await self.execute_command("""
+                CREATE SCHEMA IF NOT EXISTS data_privacy;
+            """)
+            
+            # Create data subjects table
+            await self.execute_command("""
+                CREATE TABLE IF NOT EXISTS data_privacy.data_subjects (
+                    subject_id VARCHAR(255) PRIMARY KEY,
+                    email VARCHAR(255),
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_accessed TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    data_categories JSONB NOT NULL,
+                    retention_until TIMESTAMP NOT NULL,
+                    consent_given BOOLEAN NOT NULL DEFAULT TRUE,
+                    consent_withdrawn BOOLEAN NOT NULL DEFAULT FALSE,
+                    created_at_ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            
+            # Create audit logs table
+            await self.execute_command("""
+                CREATE TABLE IF NOT EXISTS data_privacy.audit_logs (
+                    log_id VARCHAR(255) PRIMARY KEY,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    action VARCHAR(255) NOT NULL,
+                    subject_id VARCHAR(255),
+                    user_id VARCHAR(255),
+                    details JSONB,
+                    ip_address VARCHAR(45),
+                    user_agent TEXT,
+                    created_at_ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            
+            # Create retention policies table
+            await self.execute_command("""
+                CREATE TABLE IF NOT EXISTS data_privacy.retention_policies (
+                    policy_id VARCHAR(255) PRIMARY KEY,
+                    data_category VARCHAR(255) NOT NULL,
+                    retention_days INTEGER NOT NULL,
+                    auto_delete BOOLEAN NOT NULL DEFAULT TRUE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            
+            # Create anonymization records table
+            await self.execute_command("""
+                CREATE TABLE IF NOT EXISTS data_privacy.anonymization_records (
+                    record_id VARCHAR(255) PRIMARY KEY,
+                    original_text TEXT NOT NULL,
+                    anonymized_text TEXT NOT NULL,
+                    anonymization_method VARCHAR(255) NOT NULL,
+                    pii_detected JSONB,
+                    confidence_scores JSONB,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            
+            logger.info("Data privacy database schema initialized successfully")
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize database schema: {e}")
+            raise
+
+
+# Global database manager instance
+db_manager = DatabaseManager()

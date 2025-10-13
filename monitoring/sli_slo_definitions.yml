@@ -1,0 +1,241 @@
+# Service Level Indicators (SLIs) and Service Level Objectives (SLOs)
+# for ML Security Platform
+
+# Availability SLIs
+availability:
+  model_api:
+    sli: "Successful prediction requests / Total prediction requests"
+    query: "rate(model_api_requests_total{status!~'5..'}[5m]) / rate(model_api_requests_total[5m])"
+    slo: 99.9  # 99.9% availability
+    window: "30d"
+  
+  training_service:
+    sli: "Successful training jobs / Total training jobs"
+    query: "rate(training_jobs_total{status='completed'}[1h]) / rate(training_jobs_total[1h])"
+    slo: 95.0  # 95% success rate
+    window: "7d"
+  
+  analytics_service:
+    sli: "Successful drift detection requests / Total drift detection requests"
+    query: "rate(analytics_requests_total{status!~'5..'}[5m]) / rate(analytics_requests_total[5m])"
+    slo: 99.5  # 99.5% availability
+    window: "30d"
+
+# Latency SLIs
+latency:
+  prediction_p95:
+    sli: "95th percentile prediction latency"
+    query: "histogram_quantile(0.95, rate(model_api_request_duration_seconds_bucket[5m]))"
+    slo: 0.2  # 200ms
+    window: "7d"
+  
+  prediction_p99:
+    sli: "99th percentile prediction latency"
+    query: "histogram_quantile(0.99, rate(model_api_request_duration_seconds_bucket[5m]))"
+    slo: 0.5  # 500ms
+    window: "7d"
+  
+  model_loading:
+    sli: "95th percentile model loading time"
+    query: "histogram_quantile(0.95, rate(model_api_model_load_duration_seconds_bucket[5m]))"
+    slo: 30  # 30 seconds
+    window: "7d"
+  
+  drift_detection:
+    sli: "95th percentile drift detection time"
+    query: "histogram_quantile(0.95, rate(analytics_request_duration_seconds_bucket[5m]))"
+    slo: 10  # 10 seconds
+    window: "7d"
+
+# Throughput SLIs
+throughput:
+  predictions_per_second:
+    sli: "Predictions per second"
+    query: "rate(model_api_predictions_total[1m])"
+    slo: 100  # 100 predictions/second minimum
+    window: "1h"
+  
+  training_jobs_per_hour:
+    sli: "Training jobs completed per hour"
+    query: "rate(training_jobs_total{status='completed'}[1h])"
+    slo: 2  # 2 training jobs per hour minimum
+    window: "24h"
+
+# Quality SLIs
+quality:
+  model_accuracy:
+    sli: "Model prediction accuracy"
+    query: "avg(model_accuracy)"
+    slo: 0.92  # 92% accuracy
+    window: "7d"
+  
+  drift_detection_accuracy:
+    sli: "Drift detection accuracy"
+    query: "avg(drift_detection_accuracy)"
+    slo: 0.95  # 95% accuracy
+    window: "7d"
+  
+  false_positive_rate:
+    sli: "False positive rate for security detection"
+    query: "rate(model_api_predictions_total{prediction='benign',actual='threat'}[1h]) / rate(model_api_predictions_total[1h])"
+    slo: 0.05  # 5% maximum false positive rate
+    window: "7d"
+
+# Resource Utilization SLIs
+resources:
+  cpu_utilization:
+    sli: "CPU utilization"
+    query: "rate(process_cpu_seconds_total[5m])"
+    slo: 0.8  # 80% maximum CPU usage
+    window: "1h"
+  
+  memory_utilization:
+    sli: "Memory utilization"
+    query: "process_resident_memory_bytes / (8 * 1024 * 1024 * 1024)"  # 8GB baseline
+    slo: 0.9  # 90% maximum memory usage
+    window: "1h"
+  
+  cache_hit_rate:
+    sli: "Model cache hit rate"
+    query: "rate(model_cache_hits_total[5m]) / (rate(model_cache_hits_total[5m]) + rate(model_cache_misses_total[5m]))"
+    slo: 0.8  # 80% cache hit rate
+    window: "1h"
+
+# Business SLIs
+business:
+  security_threat_detection:
+    sli: "Security threat detection rate"
+    query: "rate(model_api_predictions_total{prediction=~'prompt_injection|jailbreak|system_extraction|code_injection'}[5m])"
+    slo: 0.1  # 10% minimum threat detection rate
+    window: "1h"
+  
+  model_deployment_frequency:
+    sli: "Model deployment frequency"
+    query: "rate(model_promotions_total[1d])"
+    slo: 0.1  # 0.1 deployments per day minimum
+    window: "7d"
+  
+  data_processing_latency:
+    sli: "Data processing latency"
+    query: "histogram_quantile(0.95, rate(data_processing_duration_seconds_bucket[5m]))"
+    slo: 60  # 60 seconds
+    window: "1h"
+
+# Error Rate SLIs
+error_rates:
+  prediction_errors:
+    sli: "Prediction error rate"
+    query: "rate(model_api_requests_total{status=~'5..'}[5m]) / rate(model_api_requests_total[5m])"
+    slo: 0.01  # 1% maximum error rate
+    window: "1h"
+  
+  training_errors:
+    sli: "Training error rate"
+    query: "rate(training_jobs_total{status='failed'}[1h]) / rate(training_jobs_total[1h])"
+    slo: 0.05  # 5% maximum training error rate
+    window: "24h"
+  
+  drift_detection_errors:
+    sli: "Drift detection error rate"
+    query: "rate(analytics_requests_total{status=~'5..'}[5m]) / rate(analytics_requests_total[5m])"
+    slo: 0.02  # 2% maximum error rate
+    window: "1h"
+
+# Data Quality SLIs
+data_quality:
+  data_freshness:
+    sli: "Data freshness (age of latest data)"
+    query: "time() - max(data_last_updated_timestamp)"
+    slo: 3600  # 1 hour maximum data age
+    window: "1h"
+  
+  data_completeness:
+    sli: "Data completeness"
+    query: "avg(data_completeness_score)"
+    slo: 0.95  # 95% data completeness
+    window: "1h"
+  
+  prediction_confidence:
+    sli: "Average prediction confidence"
+    query: "avg(prediction_confidence)"
+    slo: 0.8  # 80% average confidence
+    window: "1h"
+
+# ML Pipeline SLIs
+ml_pipeline:
+  model_training_time:
+    sli: "Model training time"
+    query: "histogram_quantile(0.95, rate(training_duration_seconds_bucket[1h]))"
+    slo: 1800  # 30 minutes
+    window: "7d"
+  
+  model_validation_time:
+    sli: "Model validation time"
+    query: "histogram_quantile(0.95, rate(model_validation_duration_seconds_bucket[1h]))"
+    slo: 300  # 5 minutes
+    window: "7d"
+  
+  auto_retrain_success_rate:
+    sli: "Auto-retrain success rate"
+    query: "rate(auto_retrains_total{status='completed'}[1h]) / rate(auto_retrains_total[1h])"
+    slo: 0.9  # 90% success rate
+    window: "7d"
+
+# Security SLIs
+security:
+  input_sanitization_rate:
+    sli: "Input sanitization success rate"
+    query: "rate(input_sanitization_success_total[5m]) / (rate(input_sanitization_success_total[5m]) + rate(input_sanitization_failures_total[5m]))"
+    slo: 0.99  # 99% success rate
+    window: "1h"
+  
+  pii_detection_rate:
+    sli: "PII detection rate"
+    query: "rate(pii_detections_total[5m])"
+    slo: 0.01  # 1% PII detection rate (should be low)
+    window: "1h"
+  
+  audit_logging_success:
+    sli: "Audit logging success rate"
+    query: "rate(audit_logs_success_total[5m]) / (rate(audit_logs_success_total[5m]) + rate(audit_logs_failures_total[5m]))"
+    slo: 0.99  # 99% success rate
+    window: "1h"
+
+# Alerting Rules for SLO Violations
+slo_violations:
+  availability_violation:
+    condition: "availability < slo_threshold"
+    severity: "critical"
+    notification: "immediate"
+  
+  latency_violation:
+    condition: "latency > slo_threshold"
+    severity: "warning"
+    notification: "5min"
+  
+  quality_violation:
+    condition: "quality < slo_threshold"
+    severity: "critical"
+    notification: "immediate"
+  
+  resource_violation:
+    condition: "resources > slo_threshold"
+    severity: "warning"
+    notification: "10min"
+
+# Error Budget Tracking
+error_budgets:
+  availability:
+    slo: 99.9
+    window: "30d"
+    error_budget: 0.1  # 0.1% error budget
+  
+  latency:
+    slo: 0.2  # 200ms
+    window: "7d"
+    error_budget: 0.05  # 5% error budget
+  
+  quality:
+    slo: 0.92  # 92% accuracy
+    window: "7d"
+    error_budget: 0.08  # 8% error budget

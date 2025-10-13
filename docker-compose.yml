@@ -1,0 +1,386 @@
+services:
+  # MLflow Tracking Server
+  mlflow:
+    build:
+      context: ./services/mlflow
+      dockerfile: Dockerfile
+    ports:
+      - "5000:5000"
+    environment:
+      - MLFLOW_BACKEND_STORE_URI=postgresql://mlflow:password@postgres:5432/ml_security_consolidated
+      - MLFLOW_DEFAULT_ARTIFACT_ROOT=s3://mlflow-artifacts
+      - AWS_ACCESS_KEY_ID=minioadmin
+      - AWS_SECRET_ACCESS_KEY=minioadmin
+      - MLFLOW_S3_ENDPOINT_URL=http://minio:9000
+    depends_on:
+      - postgres
+      - minio
+    volumes:
+      - ./data/mlflow:/mlflow
+    networks:
+      - ml-network
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:13
+    environment:
+      - POSTGRES_DB=ml_security_consolidated
+      - POSTGRES_USER=mlflow
+      - POSTGRES_PASSWORD=password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init_db_consolidated_safe.sql:/docker-entrypoint-initdb.d/init_db_consolidated_safe.sql
+    ports:
+      - "5433:5432"
+    networks:
+      - ml-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mlflow -d ml_security_consolidated"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # MinIO Object Storage
+  minio:
+    image: minio/minio:latest
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+    networks:
+      - ml-network
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - ml-network
+
+  # Red Team Service
+  red-team:
+    build:
+      context: ./services/red-team
+      dockerfile: Dockerfile
+    ports:
+      - "8001:8001"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - POSTGRES_URL=postgresql://mlflow:password@postgres:5432/ml_security_consolidated
+      - JAEGER_AGENT_HOST=jaeger
+      - JAEGER_AGENT_PORT=14268
+    depends_on:
+      - redis
+      - mlflow
+      - postgres
+      - jaeger
+    volumes:
+      - ./data/red_team:/app/data
+      - ./services/red-team:/app
+    networks:
+      - ml-network
+
+  # Model Training Service
+  training:
+    build:
+      context: ./services/training
+      dockerfile: Dockerfile
+    ports:
+      - "8002:8002"
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - POSTGRES_URL=postgresql://mlflow:password@postgres:5432/ml_security_consolidated
+      - MINIO_URL=http://minio:9000
+      - AWS_ACCESS_KEY_ID=minioadmin
+      - AWS_SECRET_ACCESS_KEY=minioadmin
+      - MLFLOW_S3_ENDPOINT_URL=http://minio:9000
+      - NVIDIA_VISIBLE_DEVICES=all
+    depends_on:
+      - mlflow
+      - postgres
+      - minio
+    volumes:
+      - ./data/training_data:/app/training_data
+      - ./services/training:/app
+    deploy:
+      resources:
+        limits:
+          cpus: '6.0'
+          memory: 6G
+        reservations:
+          cpus: '2.0'
+          memory: 2G
+    networks:
+      - ml-network
+
+  # Model Serving API
+  model-api:
+    build:
+      context: ./services/model-api
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - JAEGER_AGENT_HOST=jaeger
+      - AWS_ACCESS_KEY_ID=minioadmin
+      - AWS_SECRET_ACCESS_KEY=minioadmin
+      - MLFLOW_S3_ENDPOINT_URL=http://minio:9000
+      - JAEGER_AGENT_PORT=14268
+      - NVIDIA_VISIBLE_DEVICES=all
+    depends_on:
+      - redis
+      - mlflow
+      - jaeger
+    volumes:
+      - ./services/model-api:/app
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 8G
+        reservations:
+          cpus: '2.0'
+          memory: 4G
+    networks:
+      - ml-network
+
+
+  # Model Cache Service
+  model-cache:
+    build:
+      context: ./services/model-cache
+      dockerfile: Dockerfile
+    ports:
+      - "8003:8003"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+    depends_on:
+      - redis
+      - mlflow
+    volumes:
+      - ./data/cache:/app/cache
+    networks:
+      - ml-network
+
+  # Business Metrics Service
+  business-metrics:
+    build:
+      context: ./services/business-metrics
+      dockerfile: Dockerfile
+    ports:
+      - "8004:8004"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - POSTGRES_URL=postgresql://mlflow:password@postgres:5432/ml_security_consolidated
+    depends_on:
+      - redis
+      - postgres
+    volumes:
+      - ./data/business_metrics:/app/data
+    networks:
+      - ml-network
+
+  # Data Privacy Service
+  data-privacy:
+    build:
+      context: ./services/data-privacy
+      dockerfile: Dockerfile
+    ports:
+      - "8008:8005"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - POSTGRES_URL=postgresql://mlflow:password@postgres:5432/ml_security_consolidated
+    depends_on:
+      - redis
+      - postgres
+    volumes:
+      - ./data/privacy:/app/data
+      - ./data/audit:/app/audit
+    networks:
+      - ml-network
+
+  # Jaeger Tracing
+  jaeger:
+    image: jaegertracing/all-in-one:1.51
+    ports:
+      - "16686:16686"  # Jaeger UI
+      - "14268:14268"  # HTTP collector
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    networks:
+      - ml-network
+
+  # Tracing Service
+  tracing:
+    build:
+      context: ./services/tracing
+      dockerfile: Dockerfile
+    container_name: local-ml-security-tracing-1
+    ports:
+      - "8009:8009"
+    environment:
+      - JAEGER_AGENT_HOST=jaeger
+      - JAEGER_AGENT_PORT=14268
+      - REDIS_URL=redis://redis:6379
+      - POSTGRES_URL=postgresql://mlflow:password@postgres:5432/ml_security_consolidated
+    depends_on:
+      - jaeger
+      - redis
+      - postgres
+    networks:
+      - ml-network
+    restart: unless-stopped
+
+  # Monitoring Dashboard
+  # monitoring:
+  #   build:
+  #     context: ./services/monitoring
+  #     dockerfile: Dockerfile
+  #   ports:
+  #     - "8501:8501"
+  #   environment:
+  #     - REDIS_URL=redis://redis:6379
+  #     - POSTGRES_URL=postgresql://mlflow:password@postgres:5432/ml_security_consolidated
+  #     - BUSINESS_METRICS_URL=http://business-metrics:8004
+  #     - DATA_PRIVACY_URL=http://data-privacy:8005
+  #     - MODEL_CACHE_URL=http://model-cache:8003
+  #   depends_on:
+  #     - redis
+  #     - postgres
+  #     - business-metrics
+  #     - data-privacy
+  #     - model-cache
+  #   volumes:
+  #     - ./data/monitoring:/app/data
+  #   networks:
+  #     - ml-network
+
+  # Prometheus
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    networks:
+      - ml-network
+
+  # Grafana
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ALLOW_LOADING_UNSIGNED_PLUGINS=*
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+      - ./monitoring/grafana/grafana.ini:/etc/grafana/grafana.ini
+    networks:
+      - ml-network
+
+  analytics:
+    build: ./services/analytics
+    ports:
+      - "8006:8006"
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=ml_security_consolidated
+      - POSTGRES_USER=mlflow
+      - POSTGRES_PASSWORD=password
+    depends_on:
+      - postgres
+    volumes:
+      - ./services/analytics:/app
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 4G
+        reservations:
+          cpus: '1.0'
+          memory: 2G
+    networks:
+      - ml-network
+
+  # Enterprise Dashboard
+  enterprise-dashboard-backend:
+    build:
+      context: ./services/enterprise-dashboard/backend
+      dockerfile: Dockerfile
+    container_name: enterprise-dashboard-backend
+    ports:
+      - "8007:8005"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - POSTGRES_URL=postgresql://mlflow:password@postgres:5432/ml_security_consolidated
+    volumes:
+      - ./services/enterprise-dashboard/backend:/app
+    depends_on:
+      - redis
+      - postgres
+      - training
+      - model-api
+      - red-team
+      - analytics
+      - mlflow
+      - minio
+    networks:
+      - ml-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8005/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  enterprise-dashboard-frontend:
+    build:
+      context: ./services/enterprise-dashboard/frontend
+      dockerfile: Dockerfile.new
+    container_name: enterprise-dashboard-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_API_URL=http://enterprise-dashboard-backend:8005
+      - REACT_APP_WS_URL=ws://enterprise-dashboard-backend:8005/ws
+    depends_on:
+      - enterprise-dashboard-backend
+    networks:
+      - ml-network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  minio_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  ml-network:
+    driver: bridge

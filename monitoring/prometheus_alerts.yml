@@ -1,0 +1,268 @@
+groups:
+  - name: ml-security-platform
+    rules:
+      # Service Health Alerts
+      - alert: ServiceDown
+        expr: up{job=~"ml-security-services|analytics-service"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Service {{ $labels.instance }} is down"
+          description: "Service {{ $labels.instance }} has been down for more than 1 minute."
+
+      - alert: HighErrorRate
+        expr: rate(http_requests_total{status=~"5.."}[5m]) / rate(http_requests_total[5m]) > 0.05
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High error rate detected"
+          description: "Error rate is {{ $value | humanizePercentage }} for service {{ $labels.instance }}"
+
+      # Model Performance Alerts
+      - alert: ModelLoadTimeHigh
+        expr: histogram_quantile(0.95, rate(model_api_model_load_duration_seconds_bucket[5m])) > 30
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Model load time is high"
+          description: "95th percentile model load time is {{ $value }}s for {{ $labels.model_name }}"
+
+      - alert: ModelMemoryUsageHigh
+        expr: model_api_model_memory_bytes > 8 * 1024 * 1024 * 1024  # 8GB
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Model memory usage is high"
+          description: "Model {{ $labels.model_name }} is using {{ $value | humanizeBytes }}"
+
+      - alert: PredictionLatencyHigh
+        expr: histogram_quantile(0.95, rate(model_api_request_duration_seconds_bucket[5m])) > 0.2  # 200ms
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Prediction latency is high"
+          description: "95th percentile prediction latency is {{ $value }}s"
+
+      # Drift Detection Alerts
+      - alert: DataDriftDetected
+        expr: drift_score > 0.2
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Data drift detected"
+          description: "Data drift score {{ $value }} exceeds threshold for model {{ $labels.model_name }}"
+
+      - alert: ModelDriftDetected
+        expr: drift_score > 0.15
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Model drift detected"
+          description: "Model drift score {{ $value }} exceeds threshold for model {{ $labels.model_name }}"
+
+      # Training Alerts
+      - alert: TrainingJobFailed
+        expr: training_jobs_total{status="failed"} > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Training job failed"
+          description: "Training job {{ $labels.job_id }} for model {{ $labels.model_name }} has failed"
+
+      - alert: TrainingQueueBacklog
+        expr: training_queue_size > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Training queue backlog"
+          description: "Training queue has {{ $value }} jobs waiting"
+
+      # Cache Performance Alerts
+      - alert: CacheHitRateLow
+        expr: rate(model_cache_hits_total[5m]) / (rate(model_cache_hits_total[5m]) + rate(model_cache_misses_total[5m])) < 0.8
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Cache hit rate is low"
+          description: "Cache hit rate is {{ $value | humanizePercentage }} for model {{ $labels.model_name }}"
+
+      - alert: CacheSizeHigh
+        expr: model_cache_size_bytes > 4 * 1024 * 1024 * 1024  # 4GB
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Cache size is high"
+          description: "Model cache is using {{ $value | humanizeBytes }}"
+
+      # Business Metrics Alerts
+      - alert: LowPredictionVolume
+        expr: rate(model_api_predictions_total[1h]) < 10
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low prediction volume"
+          description: "Prediction rate is {{ $value }} per second, below expected threshold"
+
+      - alert: HighPredictionVolume
+        expr: rate(model_api_predictions_total[5m]) > 1000
+        for: 5m
+        labels:
+          severity: info
+        annotations:
+          summary: "High prediction volume"
+          description: "Prediction rate is {{ $value }} per second"
+
+      # System Resource Alerts
+      - alert: HighCPUUsage
+        expr: rate(process_cpu_seconds_total[5m]) > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU usage"
+          description: "CPU usage is {{ $value | humanizePercentage }} for service {{ $labels.instance }}"
+
+      - alert: HighMemoryUsage
+        expr: process_resident_memory_bytes > 8 * 1024 * 1024 * 1024  # 8GB
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage"
+          description: "Memory usage is {{ $value | humanizeBytes }} for service {{ $labels.instance }}"
+
+      # Database Alerts
+      - alert: DatabaseConnectionHigh
+        expr: pg_stat_database_numbackends > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High database connections"
+          description: "Database has {{ $value }} active connections"
+
+      - alert: DatabaseSlowQueries
+        expr: rate(pg_stat_database_tup_returned[5m]) / rate(pg_stat_database_tup_fetched[5m]) < 0.8
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Slow database queries"
+          description: "Database query efficiency is {{ $value | humanizePercentage }}"
+
+      # MLflow Alerts
+      - alert: MLflowExperimentFailed
+        expr: increase(mlflow_experiment_failures_total[1h]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "MLflow experiment failed"
+          description: "MLflow experiment {{ $labels.experiment_id }} has failed"
+
+      - alert: MLflowModelRegistryError
+        expr: increase(mlflow_model_registry_errors_total[1h]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "MLflow model registry error"
+          description: "MLflow model registry operation failed for model {{ $labels.model_name }}"
+
+      # Auto-Retrain Alerts
+      - alert: AutoRetrainTriggered
+        expr: increase(auto_retrains_total[1h]) > 0
+        for: 0m
+        labels:
+          severity: info
+        annotations:
+          summary: "Auto-retrain triggered"
+          description: "Auto-retrain was triggered for model {{ $labels.model_name }} due to {{ $labels.reason }}"
+
+      - alert: AutoRetrainFailed
+        expr: increase(auto_retrains_total{status="failed"}[1h]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Auto-retrain failed"
+          description: "Auto-retrain failed for model {{ $labels.model_name }}"
+
+      # Security Alerts
+      - alert: HighSecurityThreats
+        expr: rate(model_api_predictions_total{prediction=~"prompt_injection|jailbreak|system_extraction|code_injection"}[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High security threat detection rate"
+          description: "Security threat detection rate is {{ $value | humanizePercentage }}"
+
+      - alert: InputSanitizationFailures
+        expr: rate(input_sanitization_failures_total[5m]) > 0.01
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Input sanitization failures"
+          description: "Input sanitization failure rate is {{ $value | humanizePercentage }}"
+
+      # Data Privacy Alerts
+      - alert: PIIDetectionHigh
+        expr: rate(pii_detections_total[5m]) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High PII detection rate"
+          description: "PII detection rate is {{ $value | humanizePercentage }}"
+
+      # Model Promotion Alerts
+      - alert: ModelPromotionFailed
+        expr: increase(model_promotion_failures_total[1h]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Model promotion failed"
+          description: "Model promotion failed for {{ $labels.model_name }} version {{ $labels.version }}"
+
+      - alert: ModelPromotionSuccess
+        expr: increase(model_promotions_total[1h]) > 0
+        for: 0m
+        labels:
+          severity: info
+        annotations:
+          summary: "Model promoted successfully"
+          description: "Model {{ $labels.model_name }} version {{ $labels.version }} promoted to {{ $labels.stage }}"
+
+      # Performance Degradation Alerts
+      - alert: ResponseTimeDegradation
+        expr: histogram_quantile(0.95, rate(model_api_request_duration_seconds_bucket[5m])) > histogram_quantile(0.95, rate(model_api_request_duration_seconds_bucket[1h])) * 1.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Response time degradation detected"
+          description: "95th percentile response time has increased by 50% to {{ $value }}s"
+
+      - alert: ThroughputDegradation
+        expr: rate(model_api_predictions_total[5m]) < rate(model_api_predictions_total[1h]) * 0.5
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Throughput degradation detected"
+          description: "Prediction throughput has decreased by 50% to {{ $value }} per second"

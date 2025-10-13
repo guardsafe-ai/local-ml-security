@@ -1,0 +1,15 @@
+{
+  "name": "guardsafe-newsletter-pdf",
+  "version": "1.0.0",
+  "description": "Generate PDF from HTML newsletter",
+  "main": "generate-pdf.js",
+  "scripts": {
+    "generate-pdf": "node generate-pdf.js"
+  },
+  "dependencies": {
+    "puppeteer": "^21.0.0"
+  },
+  "keywords": ["pdf", "newsletter", "html"],
+  "author": "Guardsafe.ai",
+  "license": "MIT"
+}

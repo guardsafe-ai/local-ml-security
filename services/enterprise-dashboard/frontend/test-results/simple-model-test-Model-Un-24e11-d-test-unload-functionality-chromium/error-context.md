@@ -1,0 +1,336 @@
+# Page snapshot
+
+```yaml
+- generic [ref=e1]:
+  - generic [ref=e3]:
+    - banner [ref=e4]:
+      - generic [ref=e5]:
+        - generic [ref=e6]: ML Security Dashboard
+        - button [ref=e8] [cursor=pointer]:
+          - img [ref=e9] [cursor=pointer]
+        - button [ref=e11] [cursor=pointer]:
+          - img [ref=e13] [cursor=pointer]
+        - button [ref=e15] [cursor=pointer]:
+          - img [ref=e16] [cursor=pointer]
+    - navigation [ref=e18]:
+      - generic [ref=e20]:
+        - generic [ref=e22]:
+          - img [ref=e24]
+          - generic [ref=e26]:
+            - generic [ref=e27]: ML Security
+            - generic [ref=e28]: Enterprise Dashboard
+        - list [ref=e29]:
+          - listitem [ref=e30]:
+            - button [ref=e31] [cursor=pointer]:
+              - img [ref=e33] [cursor=pointer]
+              - generic [ref=e35] [cursor=pointer]:
+                - generic [ref=e36] [cursor=pointer]: Dashboard
+                - generic [ref=e37] [cursor=pointer]: System overview and key metrics
+          - listitem [ref=e38]:
+            - button [ref=e39] [cursor=pointer]:
+              - img [ref=e42] [cursor=pointer]
+              - generic [ref=e45] [cursor=pointer]:
+                - generic [ref=e46] [cursor=pointer]: Model Management
+                - generic [ref=e47] [cursor=pointer]: Load, unload, and manage ML models
+          - listitem [ref=e48]:
+            - button [ref=e49] [cursor=pointer]:
+              - img [ref=e52] [cursor=pointer]
+              - generic [ref=e54] [cursor=pointer]:
+                - generic [ref=e55] [cursor=pointer]: Training Center
+                - generic [ref=e56] [cursor=pointer]: Train and retrain security models
+          - listitem [ref=e57]:
+            - button [ref=e58] [cursor=pointer]:
+              - img [ref=e61] [cursor=pointer]
+              - generic [ref=e63] [cursor=pointer]:
+                - generic [ref=e64] [cursor=pointer]: Red Team Testing
+                - generic [ref=e65] [cursor=pointer]: Security testing and attack simulation
+          - listitem [ref=e66]:
+            - button [ref=e67] [cursor=pointer]:
+              - img [ref=e69] [cursor=pointer]
+              - generic [ref=e71] [cursor=pointer]:
+                - generic [ref=e72] [cursor=pointer]: Analytics
+                - generic [ref=e73] [cursor=pointer]: Performance metrics and insights
+          - listitem [ref=e74]:
+            - button [ref=e75] [cursor=pointer]:
+              - img [ref=e77] [cursor=pointer]
+              - generic [ref=e79] [cursor=pointer]:
+                - generic [ref=e80] [cursor=pointer]: MLflow
+                - generic [ref=e81] [cursor=pointer]: Experiment tracking and model registry
+          - listitem [ref=e82]:
+            - button [ref=e83] [cursor=pointer]:
+              - img [ref=e85] [cursor=pointer]
+              - generic [ref=e87] [cursor=pointer]:
+                - generic [ref=e88] [cursor=pointer]: Monitoring
+                - generic [ref=e89] [cursor=pointer]: System monitoring and observability
+          - listitem [ref=e90]:
+            - button [ref=e91] [cursor=pointer]:
+              - img [ref=e93] [cursor=pointer]
+              - generic [ref=e95] [cursor=pointer]:
+                - generic [ref=e96] [cursor=pointer]: Business Metrics
+                - generic [ref=e97] [cursor=pointer]: Cost analysis and ROI metrics
+          - listitem [ref=e98]:
+            - button [ref=e99] [cursor=pointer]:
+              - img [ref=e101] [cursor=pointer]
+              - generic [ref=e103] [cursor=pointer]:
+                - generic [ref=e104] [cursor=pointer]: Data Privacy
+                - generic [ref=e105] [cursor=pointer]: GDPR compliance and data protection
+          - listitem [ref=e106]:
+            - button [ref=e107] [cursor=pointer]:
+              - img [ref=e109] [cursor=pointer]
+              - generic [ref=e111] [cursor=pointer]:
+                - generic [ref=e112] [cursor=pointer]: Settings
+                - generic [ref=e113] [cursor=pointer]: System configuration and administration
+        - generic [ref=e114]:
+          - generic [ref=e115]: "Last updated: 3:03:21 PM"
+          - generic [ref=e116]: "Detection Rate: 0%"
+    - main [ref=e117]:
+      - generic [ref=e118]:
+        - generic [ref=e119]:
+          - generic [ref=e120]:
+            - heading [level=1] [ref=e121]: Model Management
+            - paragraph [ref=e122]: Load, unload, and manage your ML security models
+          - generic [ref=e123]:
+            - button [ref=e124] [cursor=pointer]:
+              - img [ref=e126] [cursor=pointer]
+              - text: Refresh
+            - button [ref=e128] [cursor=pointer]:
+              - img [ref=e130] [cursor=pointer]
+              - text: Load Model
+        - tablist [ref=e135]:
+          - tab [selected] [ref=e136] [cursor=pointer]: Model Overview
+          - tab [ref=e137] [cursor=pointer]: Model Registry
+          - tab [ref=e138] [cursor=pointer]: Performance Analytics
+          - tab [ref=e139] [cursor=pointer]: Model Testing
+        - tabpanel [ref=e141]:
+          - generic [ref=e142]:
+            - generic [ref=e143]:
+              - generic [ref=e144]:
+                - generic [ref=e145]: Filter
+                - generic [ref=e146]:
+                  - combobox [ref=e147] [cursor=pointer]: All Models
+                  - textbox: all
+                  - img
+                  - group:
+                    - generic: Filter
+              - generic [ref=e148]:
+                - generic [ref=e149]: Sort By
+                - generic [ref=e150]:
+                  - combobox [ref=e151] [cursor=pointer]: Name
+                  - textbox: name
+                  - img
+                  - group:
+                    - generic: Sort By
+              - generic [ref=e152]:
+                - generic [ref=e153]: Order
+                - generic [ref=e154]:
+                  - combobox [ref=e155] [cursor=pointer]: Ascending
+                  - textbox: asc
+                  - img
+                  - group:
+                    - generic: Order
+            - generic [ref=e156]:
+              - generic [ref=e160]:
+                - generic [ref=e161]:
+                  - generic [ref=e162]:
+                    - img [ref=e164]
+                    - generic [ref=e167]:
+                      - generic [ref=e168]: bert-base_pretrained
+                      - generic [ref=e169]: Pre-trained • Hugging Face
+                  - generic [ref=e170]:
+                    - img [ref=e171]
+                    - generic [ref=e173]: available
+                - generic [ref=e174]:
+                  - paragraph [ref=e175]: Description
+                  - paragraph [ref=e176]: Pre-trained bert-base model for ML security classification
+                - generic [ref=e177]:
+                  - paragraph [ref=e178]: Security Labels
+                  - generic [ref=e179]:
+                    - generic [ref=e181]: prompt injection
+                    - generic [ref=e183]: jailbreak
+                    - generic [ref=e185]: system extraction
+                    - generic [ref=e187]: code injection
+                    - generic [ref=e189]: benign
+                - generic [ref=e190]:
+                  - paragraph [ref=e191]: Model Information
+                  - list [ref=e192]:
+                    - listitem [ref=e193]:
+                      - generic [ref=e194]:
+                        - generic [ref=e195]: Size
+                        - paragraph [ref=e196]: 105.0 MB
+                    - listitem [ref=e197]:
+                      - generic [ref=e198]:
+                        - generic [ref=e199]: Version
+                        - paragraph [ref=e200]: pre-trained
+                    - listitem [ref=e201]:
+                      - generic [ref=e202]:
+                        - generic [ref=e203]: Source
+                        - paragraph [ref=e204]: Hugging Face
+                    - listitem [ref=e205]:
+                      - generic [ref=e206]:
+                        - generic [ref=e207]: Status
+                        - paragraph [ref=e208]: Available
+                - generic [ref=e209]:
+                  - button [ref=e210] [cursor=pointer]:
+                    - img [ref=e212] [cursor=pointer]
+                    - text: Load
+                  - button [ref=e214] [cursor=pointer]:
+                    - img [ref=e216] [cursor=pointer]
+                    - text: Test
+              - generic [ref=e221]:
+                - generic [ref=e222]:
+                  - generic [ref=e223]:
+                    - img [ref=e225]
+                    - generic [ref=e228]:
+                      - generic [ref=e229]: deberta-v3-base_pretrained
+                      - generic [ref=e230]: Pre-trained • Hugging Face
+                  - generic [ref=e231]:
+                    - img [ref=e232]
+                    - generic [ref=e234]: available
+                - generic [ref=e235]:
+                  - paragraph [ref=e236]: Description
+                  - paragraph [ref=e237]: Pre-trained deberta-v3-base model for ML security classification
+                - generic [ref=e238]:
+                  - paragraph [ref=e239]: Security Labels
+                  - generic [ref=e240]:
+                    - generic [ref=e242]: prompt injection
+                    - generic [ref=e244]: jailbreak
+                    - generic [ref=e246]: system extraction
+                    - generic [ref=e248]: code injection
+                    - generic [ref=e250]: benign
+                - generic [ref=e251]:
+                  - paragraph [ref=e252]: Model Information
+                  - list [ref=e253]:
+                    - listitem [ref=e254]:
+                      - generic [ref=e255]:
+                        - generic [ref=e256]: Size
+                        - paragraph [ref=e257]: 3.4 GB
+                    - listitem [ref=e258]:
+                      - generic [ref=e259]:
+                        - generic [ref=e260]: Version
+                        - paragraph [ref=e261]: pre-trained
+                    - listitem [ref=e262]:
+                      - generic [ref=e263]:
+                        - generic [ref=e264]: Source
+                        - paragraph [ref=e265]: Hugging Face
+                    - listitem [ref=e266]:
+                      - generic [ref=e267]:
+                        - generic [ref=e268]: Status
+                        - paragraph [ref=e269]: Available
+                - generic [ref=e270]:
+                  - button [ref=e271] [cursor=pointer]:
+                    - img [ref=e273] [cursor=pointer]
+                    - text: Load
+                  - button [ref=e275] [cursor=pointer]:
+                    - img [ref=e277] [cursor=pointer]
+                    - text: Test
+              - generic [ref=e282]:
+                - generic [ref=e283]:
+                  - generic [ref=e284]:
+                    - img [ref=e286]
+                    - generic [ref=e289]:
+                      - generic [ref=e290]: distilbert_pretrained
+                      - generic [ref=e291]: Pre-trained • Hugging Face
+                  - generic [ref=e292]:
+                    - img [ref=e293]
+                    - generic [ref=e295]: available
+                - generic [ref=e296]:
+                  - paragraph [ref=e297]: Description
+                  - paragraph [ref=e298]: Pre-trained distilbert model for ML security classification
+                - generic [ref=e299]:
+                  - paragraph [ref=e300]: Security Labels
+                  - generic [ref=e301]:
+                    - generic [ref=e303]: prompt injection
+                    - generic [ref=e305]: jailbreak
+                    - generic [ref=e307]: system extraction
+                    - generic [ref=e309]: code injection
+                    - generic [ref=e311]: benign
+                - generic [ref=e312]:
+                  - paragraph [ref=e313]: Model Information
+                  - list [ref=e314]:
+                    - listitem [ref=e315]:
+                      - generic [ref=e316]:
+                        - generic [ref=e317]: Size
+                        - paragraph [ref=e318]: 63.9 MB
+                    - listitem [ref=e319]:
+                      - generic [ref=e320]:
+                        - generic [ref=e321]: Version
+                        - paragraph [ref=e322]: pre-trained
+                    - listitem [ref=e323]:
+                      - generic [ref=e324]:
+                        - generic [ref=e325]: Source
+                        - paragraph [ref=e326]: Hugging Face
+                    - listitem [ref=e327]:
+                      - generic [ref=e328]:
+                        - generic [ref=e329]: Status
+                        - paragraph [ref=e330]: Available
+                - generic [ref=e331]:
+                  - button [ref=e332] [cursor=pointer]:
+                    - img [ref=e334] [cursor=pointer]
+                    - text: Load
+                  - button [ref=e336] [cursor=pointer]:
+                    - img [ref=e338] [cursor=pointer]
+                    - text: Test
+              - generic [ref=e343]:
+                - generic [ref=e344]:
+                  - generic [ref=e345]:
+                    - img [ref=e347]
+                    - generic [ref=e350]:
+                      - generic [ref=e351]: roberta-base_pretrained
+                      - generic [ref=e352]: Pre-trained • Hugging Face
+                  - generic [ref=e353]:
+                    - img [ref=e354]
+                    - generic [ref=e356]: available
+                - generic [ref=e357]:
+                  - paragraph [ref=e358]: Description
+                  - paragraph [ref=e359]: Pre-trained roberta-base model for ML security classification
+                - generic [ref=e360]:
+                  - paragraph [ref=e361]: Security Labels
+                  - generic [ref=e362]:
+                    - generic [ref=e364]: prompt injection
+                    - generic [ref=e366]: jailbreak
+                    - generic [ref=e368]: system extraction
+                    - generic [ref=e370]: code injection
+                    - generic [ref=e372]: benign
+                - generic [ref=e373]:
+                  - paragraph [ref=e374]: Model Information
+                  - list [ref=e375]:
+                    - listitem [ref=e376]:
+                      - generic [ref=e377]:
+                        - generic [ref=e378]: Size
+                        - paragraph [ref=e379]: 118.9 MB
+                    - listitem [ref=e380]:
+                      - generic [ref=e381]:
+                        - generic [ref=e382]: Version
+                        - paragraph [ref=e383]: pre-trained
+                    - listitem [ref=e384]:
+                      - generic [ref=e385]:
+                        - generic [ref=e386]: Source
+                        - paragraph [ref=e387]: Hugging Face
+                    - listitem [ref=e388]:
+                      - generic [ref=e389]:
+                        - generic [ref=e390]: Status
+                        - paragraph [ref=e391]: Available
+                - generic [ref=e392]:
+                  - button [ref=e393] [cursor=pointer]:
+                    - img [ref=e395] [cursor=pointer]
+                    - text: Load
+                  - button [ref=e397] [cursor=pointer]:
+                    - img [ref=e399] [cursor=pointer]
+                    - text: Test
+  - generic [ref=e401]: "0"
+  - dialog "Load Model" [ref=e404]:
+    - heading "Load Model" [level=2] [ref=e405]
+    - generic [ref=e406]:
+      - paragraph [ref=e407]: Select a model to load into memory for inference.
+      - generic [ref=e408]:
+        - generic: Model Name
+        - generic [ref=e409]:
+          - combobox [ref=e410] [cursor=pointer]
+          - textbox
+          - img
+          - group:
+            - generic: Model Name
+    - generic [ref=e411]:
+      - button "Cancel" [ref=e412] [cursor=pointer]: Cancel
+      - button "Load Model" [disabled]
+```

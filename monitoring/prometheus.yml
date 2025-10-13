@@ -1,0 +1,40 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - "prometheus_alerts.yml"
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: 'ml-security-services'
+    static_configs:
+      - targets: 
+        - 'red-team:8001'
+        - 'training:8002'
+        - 'model-api:8000'
+        - 'model-cache:8003'
+        - 'business-metrics:8004'
+        - 'data-privacy:8005'
+        - 'analytics:8006'
+        - 'monitoring:8501'
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+
+  - job_name: 'analytics-service'
+    static_configs:
+      - targets: ['analytics:8006']
+    metrics_path: '/health/metrics'
+    scrape_interval: 30s
+
+  - job_name: 'postgres'
+    static_configs:
+      - targets: ['postgres:5432']
+
+  # Redis doesn't expose Prometheus metrics, so we'll monitor it via Redis exporter if needed
+  # - job_name: 'redis'
+  #   static_configs:
+  #     - targets: ['redis:6379']
