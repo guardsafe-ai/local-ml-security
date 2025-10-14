@@ -123,6 +123,69 @@ class DatabaseManager:
                     logger.error(f"Transaction failed, rolling back: {e}")
                     raise
 
+    async def initialize_schema(self):
+        """Initialize analytics database schema"""
+        try:
+            async with self.get_connection() as conn:
+                # Create analytics schema if it doesn't exist
+                await conn.execute("CREATE SCHEMA IF NOT EXISTS analytics")
+                
+                # Create drift_detections table
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS analytics.drift_detections (
+                        id SERIAL PRIMARY KEY,
+                        model_name VARCHAR(255) NOT NULL,
+                        drift_score FLOAT NOT NULL,
+                        drift_type VARCHAR(50) NOT NULL,
+                        detected_at TIMESTAMP NOT NULL,
+                        details JSONB,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                
+                # Create retrain_jobs table
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS analytics.retrain_jobs (
+                        id SERIAL PRIMARY KEY,
+                        drift_id INTEGER REFERENCES analytics.drift_detections(id),
+                        job_id VARCHAR(255) NOT NULL,
+                        model_name VARCHAR(255) NOT NULL,
+                        status VARCHAR(50) NOT NULL,
+                        created_at TIMESTAMP NOT NULL,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                
+                # Create drift_monitoring_log table
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS analytics.drift_monitoring_log (
+                        id SERIAL PRIMARY KEY,
+                        model_name VARCHAR(255) NOT NULL,
+                        drift_score FLOAT NOT NULL,
+                        drift_type VARCHAR(50) NOT NULL,
+                        detected BOOLEAN NOT NULL,
+                        timestamp TIMESTAMP NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                
+                # Create drift_daily_reports table
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS analytics.drift_daily_reports (
+                        id SERIAL PRIMARY KEY,
+                        report_date DATE NOT NULL,
+                        report_data JSONB NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(report_date)
+                    )
+                """)
+                
+                logger.info("✅ Analytics database schema initialized successfully")
+                
+        except Exception as e:
+            logger.error(f"Failed to initialize analytics schema: {e}")
+            raise
+
 
 # Global database manager instance
 db_manager = DatabaseManager()

@@ -111,12 +111,8 @@ async def startup_event():
         
         # Initialize database schema
         try:
-            with open("/app/schema.sql", "r") as f:
-                schema_sql = f.read()
-            await db_manager.execute_command(schema_sql)
+            await db_manager.initialize_schema()
             logger.info("✅ Database schema initialized successfully")
-        except FileNotFoundError:
-            logger.warning("⚠️ Schema file not found, skipping schema initialization")
         except Exception as e:
             logger.error(f"❌ Error initializing schema: {e}")
             
@@ -130,6 +126,17 @@ async def startup_event():
         logger.info("🔄 Auto-retrain monitoring started")
     except Exception as e:
         logger.error(f"Failed to start auto-retrain monitoring: {e}")
+    
+    # Start drift monitoring
+    try:
+        from services.drift_detection import drift_detector
+        from services.email_notifications import email_service
+        await start_drift_monitoring(drift_detector, email_service, db_manager)
+        logger.info("✅ Drift monitoring started")
+    except Exception as e:
+        logger.error(f"❌ Failed to start drift monitoring: {e}")
+    
+    logger.info("Analytics Service ready")
 
 # Graceful shutdown handler
 class GracefulShutdown:
@@ -211,22 +218,7 @@ class GracefulShutdown:
 shutdown_handler = GracefulShutdown(app)
 shutdown_handler.register_handlers()
 
-# Startup event
-@app.on_event("startup")
-async def startup_event():
-    """Initialize service on startup"""
-    logger.info("Starting Analytics Service...")
-    
-    # Start drift monitoring
-    try:
-        from services.drift_detection import drift_detector
-        from services.email_notifications import email_service
-        await start_drift_monitoring(drift_detector, email_service, db_manager)
-        logger.info("✅ Drift monitoring started")
-    except Exception as e:
-        logger.error(f"❌ Failed to start drift monitoring: {e}")
-    
-    logger.info("Analytics Service ready")
+# Note: Startup event is already defined above
 
 # Shutdown event
 @app.on_event("shutdown")
