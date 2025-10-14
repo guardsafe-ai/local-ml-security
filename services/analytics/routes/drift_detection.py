@@ -788,20 +788,19 @@ async def get_production_inference_data(
         
         query += " ORDER BY created_at DESC LIMIT 10000"
         
-        # Execute query
-        async with db_manager.get_connection() as conn:
-            rows = await conn.fetch(query, *params)
-            
-            if not rows:
-                logger.warning("⚠️ [PRODUCTION-DATA] No production inference data found")
-                return {"s3_path": None, "message": "No production data available"}
-            
-            # Convert to DataFrame for processing
-            data = []
-            for row in rows:
-                data.append({
-                    "input_text": row["input_text"],
-                    "prediction": row["prediction"],
+        # Execute query using monitored method
+        rows = await db_manager.fetch_many(query, *params)
+        
+        if not rows:
+            logger.warning("⚠️ [PRODUCTION-DATA] No production inference data found")
+            return {"s3_path": None, "message": "No production data available"}
+        
+        # Convert to DataFrame for processing
+        data = []
+        for row in rows:
+            data.append({
+                "input_text": row["input_text"],
+                "prediction": row["prediction"],
                     "confidence": float(row["confidence"]) if row["confidence"] else 0.0,
                     "created_at": row["created_at"].isoformat(),
                     "model_name": row["model_name"]

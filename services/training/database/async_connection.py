@@ -31,22 +31,20 @@ class DatabaseManager:
         
         @retry_async(DB_RETRY_CONFIG)
         async def _create_pool():
+            # Import service-specific timeout configuration
+            from utils.database_timeouts import get_training_timeout_config, log_timeout_config
+            
+            # Get timeout configuration for training service
+            timeout_config = get_training_timeout_config()
+            log_timeout_config(timeout_config)
+            
             self.pool = await asyncpg.create_pool(
                 host=self.connection_params["host"],
                 port=self.connection_params["port"],
                 database=self.connection_params["database"],
                 user=self.connection_params["user"],
                 password=self.connection_params["password"],
-                min_size=5,
-                max_size=20,
-                max_queries=50000,  # Recycle connections after 50k queries
-                max_inactive_connection_lifetime=300,  # 5 min idle timeout
-                timeout=30,  # 30s connection acquire timeout
-                command_timeout=60,  # 60s query timeout
-                server_settings={
-                    'jit': 'off',
-                    'statement_timeout': '60000'  # 60s statement timeout
-                }
+                **timeout_config.get_pool_config()
             )
             logger.info("Database connection pool created successfully")
             return True

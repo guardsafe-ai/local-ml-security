@@ -234,19 +234,19 @@ class DriftDetector:
                 LIMIT 10000
             """
             
-            async with db_manager.get_connection() as conn:
-                rows = await conn.fetch(query, model_name, hours)
-                
-                if not rows:
-                    logger.warning(f"No production inference data found for {model_name}")
-                    return pd.DataFrame()
-                
-                # Convert to DataFrame
-                data = []
-                for row in rows:
-                    data.append({
-                        "input_text": row["input_text"],
-                        "prediction": row["prediction"],
+            # Use monitored method for database query
+            rows = await db_manager.fetch_many(query, model_name, hours)
+            
+            if not rows:
+                logger.warning(f"No production inference data found for {model_name}")
+                return pd.DataFrame()
+            
+            # Convert to DataFrame
+            data = []
+            for row in rows:
+                data.append({
+                    "input_text": row["input_text"],
+                    "prediction": row["prediction"],
                         "confidence": float(row["confidence"]) if row["confidence"] else 0.0,
                         "created_at": row["created_at"],
                         "model_name": row["model_name"]

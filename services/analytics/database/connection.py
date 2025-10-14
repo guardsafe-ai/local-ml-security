@@ -8,6 +8,7 @@ import asyncpg
 from typing import Optional, Dict, Any, List
 from contextlib import asynccontextmanager
 import logging
+from utils.query_monitoring import monitor_query, get_analytics_query_monitor
 
 logger = logging.getLogger(__name__)
 
@@ -26,24 +27,22 @@ class DatabaseManager:
         }
     
     async def connect(self) -> None:
-        """Create database connection pool with retry logic"""
+        """Create database connection pool with retry logic and standardized timeouts"""
         try:
+            # Import service-specific timeout configuration
+            from utils.database_timeouts import get_analytics_timeout_config, log_timeout_config
+            
+            # Get timeout configuration for analytics service
+            timeout_config = get_analytics_timeout_config()
+            log_timeout_config(timeout_config)
+            
             self.pool = await asyncpg.create_pool(
                 host=self.connection_params["host"],
                 port=self.connection_params["port"],
                 database=self.connection_params["database"],
                 user=self.connection_params["user"],
                 password=self.connection_params["password"],
-                min_size=5,
-                max_size=20,
-                max_queries=50000,  # Recycle connections after 50k queries
-                max_inactive_connection_lifetime=300,  # 5 min idle timeout
-                timeout=30,  # 30s connection acquire timeout
-                command_timeout=60,  # 60s query timeout
-                server_settings={
-                    'jit': 'off',
-                    'statement_timeout': '60000'  # 60s statement timeout
-                }
+                **timeout_config.get_pool_config()
             )
             logger.info("✅ Analytics database connection pool created successfully")
         except Exception as e:
@@ -58,13 +57,45 @@ class DatabaseManager:
     
     @asynccontextmanager
     async def get_connection(self):
-        """Async context manager for database connections"""
+        """Async context manager for database connections with query monitoring"""
         if not self.pool:
             raise RuntimeError("Database not connected. Call connect() first.")
         
+        # Create a monitored connection wrapper
+        class MonitoredConnection:
+            def __init__(self, connection, monitor):
+                self.connection = connection
+                self.monitor = monitor
+            
+            def __getattr__(self, name):
+                # Delegate all other attributes to the original connection
+                return getattr(self.connection, name)
+            
+            async def execute(self, query, *args, **kwargs):
+                """Monitored execute method"""
+                async with monitor_query("connection_execute", self.connection.execute, query, *args, **kwargs) as result:
+                    return result
+            
+            async def fetch(self, query, *args, **kwargs):
+                """Monitored fetch method"""
+                async with monitor_query("connection_fetch", self.connection.fetch, query, *args, **kwargs) as result:
+                    return result
+            
+            async def fetchrow(self, query, *args, **kwargs):
+                """Monitored fetchrow method"""
+                async with monitor_query("connection_fetchrow", self.connection.fetchrow, query, *args, **kwargs) as result:
+                    return result
+            
+            async def fetchval(self, query, *args, **kwargs):
+                """Monitored fetchval method"""
+                async with monitor_query("connection_fetchval", self.connection.fetchval, query, *args, **kwargs) as result:
+                    return result
+        
         async with self.pool.acquire() as connection:
             try:
-                yield connection
+                # Wrap the connection with monitoring
+                monitored_conn = MonitoredConnection(connection, get_analytics_query_monitor())
+                yield monitored_conn
             except Exception as e:
                 logger.error(f"Database operation failed: {e}")
                 raise
@@ -80,7 +111,12 @@ class DatabaseManager:
                 raise
     
     async def execute_command(self, command: str, *args) -> str:
-        """Execute an INSERT/UPDATE/DELETE command and return status"""
+        """Execute an INSERT/UPDATE/DELETE command and return status with query monitoring"""
+        async with monitor_query("execute_command", self._execute_command_impl, command, *args) as result:
+            return result
+    
+    async def _execute_command_impl(self, command: str, *args) -> str:
+        """Internal implementation of execute_command"""
         async with self.get_connection() as conn:
             try:
                 result = await conn.execute(command, *args)
@@ -90,7 +126,12 @@ class DatabaseManager:
                 raise
     
     async def fetch_one(self, query: str, *args) -> Optional[Dict[str, Any]]:
-        """Fetch a single row as dict"""
+        """Fetch a single row as dict with query monitoring"""
+        async with monitor_query("fetch_one", self._fetch_one_impl, query, *args) as result:
+            return result
+    
+    async def _fetch_one_impl(self, query: str, *args) -> Optional[Dict[str, Any]]:
+        """Internal implementation of fetch_one"""
         async with self.get_connection() as conn:
             try:
                 row = await conn.fetchrow(query, *args)
@@ -100,7 +141,12 @@ class DatabaseManager:
                 raise
     
     async def fetch_many(self, query: str, *args, limit: int = 1000) -> List[Dict[str, Any]]:
-        """Fetch multiple rows as list of dicts with limit"""
+        """Fetch multiple rows as list of dicts with limit and query monitoring"""
+        async with monitor_query("fetch_many", self._fetch_many_impl, query, *args, limit=limit) as result:
+            return result
+    
+    async def _fetch_many_impl(self, query: str, *args, limit: int = 1000) -> List[Dict[str, Any]]:
+        """Internal implementation of fetch_many"""
         async with self.get_connection() as conn:
             try:
                 rows = await conn.fetch(query, *args)
@@ -111,14 +157,46 @@ class DatabaseManager:
     
     @asynccontextmanager
     async def transaction(self):
-        """Database transaction context manager with automatic rollback on failure"""
+        """Database transaction context manager with automatic rollback on failure and query monitoring"""
         if not self.pool:
             raise RuntimeError("Database not connected. Call connect() first.")
+        
+        # Create a monitored connection wrapper
+        class MonitoredConnection:
+            def __init__(self, connection, monitor):
+                self.connection = connection
+                self.monitor = monitor
+            
+            def __getattr__(self, name):
+                # Delegate all other attributes to the original connection
+                return getattr(self.connection, name)
+            
+            async def execute(self, query, *args, **kwargs):
+                """Monitored execute method"""
+                async with monitor_query("transaction_execute", self.connection.execute, query, *args, **kwargs) as result:
+                    return result
+            
+            async def fetch(self, query, *args, **kwargs):
+                """Monitored fetch method"""
+                async with monitor_query("transaction_fetch", self.connection.fetch, query, *args, **kwargs) as result:
+                    return result
+            
+            async def fetchrow(self, query, *args, **kwargs):
+                """Monitored fetchrow method"""
+                async with monitor_query("transaction_fetchrow", self.connection.fetchrow, query, *args, **kwargs) as result:
+                    return result
+            
+            async def fetchval(self, query, *args, **kwargs):
+                """Monitored fetchval method"""
+                async with monitor_query("transaction_fetchval", self.connection.fetchval, query, *args, **kwargs) as result:
+                    return result
         
         async with self.pool.acquire() as connection:
             async with connection.transaction():
                 try:
-                    yield connection
+                    # Wrap the connection with monitoring
+                    monitored_conn = MonitoredConnection(connection, get_analytics_query_monitor())
+                    yield monitored_conn
                 except Exception as e:
                     logger.error(f"Transaction failed, rolling back: {e}")
                     raise

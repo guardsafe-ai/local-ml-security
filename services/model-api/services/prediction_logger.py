@@ -48,11 +48,16 @@ class PredictionLogger:
     async def initialize(self):
         """Initialize database connection pool"""
         try:
+            # Import service-specific timeout configuration
+            from utils.database_timeouts import get_model_api_timeout_config, log_timeout_config
+            
+            # Get timeout configuration for model-api service
+            timeout_config = get_model_api_timeout_config()
+            log_timeout_config(timeout_config)
+            
             self.pool = await asyncpg.create_pool(
                 self.database_url,
-                min_size=2,
-                max_size=10,
-                command_timeout=60
+                **timeout_config.get_pool_config()
             )
             
             # Create predictions table if it doesn't exist

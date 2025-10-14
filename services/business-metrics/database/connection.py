@@ -22,20 +22,18 @@ class DatabaseManager:
         self.connection_string = self.config["postgres_url"]
     
     async def connect(self) -> None:
-        """Establish database connection pool"""
+        """Establish database connection pool with standardized timeouts"""
         try:
+            # Import service-specific timeout configuration
+            from utils.database_timeouts import get_business_metrics_timeout_config, log_timeout_config
+            
+            # Get timeout configuration for business-metrics service
+            timeout_config = get_business_metrics_timeout_config()
+            log_timeout_config(timeout_config)
+            
             self.pool = await asyncpg.create_pool(
                 self.connection_string,
-                min_size=5,
-                max_size=20,
-                max_queries=50000,  # Recycle connections after 50k queries
-                max_inactive_connection_lifetime=300,  # 5 min idle timeout
-                timeout=30,  # 30s connection acquire timeout
-                command_timeout=60,  # 60s query timeout
-                server_settings={
-                    'jit': 'off',
-                    'statement_timeout': '60000'  # 60s statement timeout
-                }
+                **timeout_config.get_pool_config()
             )
             logger.info("Database connection pool created successfully")
         except Exception as e:

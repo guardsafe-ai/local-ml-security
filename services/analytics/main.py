@@ -28,6 +28,7 @@ from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTEN
 from utils.enhanced_logging import get_analytics_logger, log_analytics_error, log_analytics_event
 from utils.http_client import get_http_client, close_http_client
 from utils.circuit_breaker import get_database_breaker, get_redis_breaker, get_external_api_breaker
+from utils.query_monitoring import get_analytics_query_monitor, log_analytics_query_performance
 from background_tasks import start_drift_monitoring, stop_drift_monitoring
 
 # Import tracing setup
@@ -264,6 +265,65 @@ async def reset_all_circuit_breakers():
     except Exception as e:
         logger.error(f"Error resetting circuit breakers: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# Query performance monitoring endpoints
+@app.get("/query-performance")
+async def get_query_performance():
+    """Get query performance metrics"""
+    try:
+        monitor = get_analytics_query_monitor()
+        summary = monitor.get_performance_summary()
+        return summary
+    except Exception as e:
+        logger.error(f"Error getting query performance: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/query-performance/log")
+async def log_query_performance_endpoint():
+    """Log current query performance metrics"""
+    try:
+        log_analytics_query_performance()
+        return {"message": "Query performance logged successfully"}
+    except Exception as e:
+        logger.error(f"Error logging query performance: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/query-performance/clear")
+async def clear_query_metrics():
+    """Clear query performance metrics"""
+    try:
+        monitor = get_analytics_query_monitor()
+        monitor.clear_metrics()
+        return {"message": "Query metrics cleared successfully"}
+    except Exception as e:
+        logger.error(f"Error clearing query metrics: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Test endpoint to trigger database operations for query monitoring
+@app.get("/test-db-operations")
+async def test_database_operations():
+    """Test endpoint to trigger database operations and verify query monitoring"""
+    try:
+        # Test fetch_one operation
+        result1 = await db_manager.fetch_one("SELECT 1 as test_value")
+        
+        # Test fetch_many operation  
+        result2 = await db_manager.fetch_many("SELECT 'test' as test_string, 42 as test_number LIMIT 5")
+        
+        # Test execute_command operation
+        result3 = await db_manager.execute_command("SELECT 'command_test' as test_command")
+        
+        return {
+            "message": "Database operations completed successfully",
+            "fetch_one_result": result1,
+            "fetch_many_count": len(result2),
+            "execute_command_result": result3,
+            "operations_performed": ["fetch_one", "fetch_many", "execute_command"]
+        }
+    except Exception as e:
+        logger.error(f"Error in test database operations: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # Note: Startup event is already defined above
 

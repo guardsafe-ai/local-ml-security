@@ -76,10 +76,20 @@ class BusinessMetricsService:
         self.start_time = time.time()
         
     async def initialize(self):
-        """Initialize database and Redis connections"""
+        """Initialize database and Redis connections with timeout configuration"""
         try:
-            # Initialize PostgreSQL connection pool
-            self.conn_pool = await asyncpg.create_pool(self.db_url)
+            # Import service-specific timeout configuration
+            from utils.database_timeouts import get_business_metrics_timeout_config, log_timeout_config
+            
+            # Get timeout configuration for business-metrics service
+            timeout_config = get_business_metrics_timeout_config()
+            log_timeout_config(timeout_config)
+            
+            # Initialize PostgreSQL connection pool with timeout configuration
+            self.conn_pool = await asyncpg.create_pool(
+                self.db_url,
+                **timeout_config.get_pool_config()
+            )
             await self._create_tables()
             
             # Initialize Redis client
