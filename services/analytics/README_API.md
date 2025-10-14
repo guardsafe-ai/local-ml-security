@@ -9,7 +9,6 @@ http://analytics:8006
 All endpoints require authentication headers:
 ```javascript
 headers: {
-  'Authorization': 'Bearer <token>',
   'Content-Type': 'application/json'
 }
 ```

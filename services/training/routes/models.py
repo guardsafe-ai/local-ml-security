@@ -5,6 +5,7 @@ Model management and information endpoints
 
 import logging
 from typing import List, Dict, Any
+from datetime import datetime
 from fastapi import APIRouter, HTTPException
 from models.responses import ModelListResponse, ModelRegistryResponse, ModelVersionsResponse, ModelInfo
 from services.model_trainer import ModelTrainer
@@ -137,36 +138,72 @@ async def get_model_loading_status():
 
 @router.post("/models/{model_name}/promote")
 async def promote_model_to_production(model_name: str, version: str = None):
-    """Promote model from Staging to Production"""
+    """Promote model from Staging to Production with transaction management"""
     try:
         from mlflow.tracking import MlflowClient
+        from database.async_connection import db_manager
+        
         client = MlflowClient()
         
-        # If no version specified, get the latest Staging version
-        if not version:
-            versions = client.search_model_versions(f"name='{model_name}'")
-            staging_versions = [v for v in versions if v.current_stage == 'Staging']
-            if not staging_versions:
-                raise HTTPException(status_code=404, detail=f"No Staging version found for model {model_name}")
-            version = staging_versions[0].version
-        
-        # Archive existing production versions
-        all_versions = client.search_model_versions(f"name='{model_name}'")
-        prod_versions = [v for v in all_versions if v.current_stage == 'Production']
-        for prod_version in prod_versions:
+        # Use transaction for model promotion operations
+        async with db_manager.transaction() as conn:
+            # If no version specified, get the latest Staging version
+            if not version:
+                versions = client.search_model_versions(f"name='{model_name}'")
+                staging_versions = [v for v in versions if v.current_stage == 'Staging']
+                if not staging_versions:
+                    raise HTTPException(status_code=404, detail=f"No Staging version found for model {model_name}")
+                version = staging_versions[0].version
+            
+            # Log model promotion event in database
+            await conn.execute(
+                """
+                INSERT INTO training.model_promotions 
+                (model_name, version, from_stage, to_stage, promoted_at, promoted_by)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                """,
+                model_name, version, "Staging", "Production", 
+                datetime.now(), "system"
+            )
+            
+            # Archive existing production versions
+            all_versions = client.search_model_versions(f"name='{model_name}'")
+            prod_versions = [v for v in all_versions if v.current_stage == 'Production']
+            for prod_version in prod_versions:
+                # Log archiving event
+                await conn.execute(
+                    """
+                    INSERT INTO training.model_promotions 
+                    (model_name, version, from_stage, to_stage, promoted_at, promoted_by)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    """,
+                    model_name, prod_version.version, "Production", "Archived",
+                    datetime.now(), "system"
+                )
+                
+                client.transition_model_version_stage(
+                    name=model_name,
+                    version=prod_version.version,
+                    stage="Archived"
+                )
+            
+            # Promote to Production
             client.transition_model_version_stage(
                 name=model_name,
-                version=prod_version.version,
-                stage="Archived"
+                version=version,
+                stage="Production",
+                archive_existing_versions=True
             )
-        
-        # Promote to Production
-        client.transition_model_version_stage(
-            name=model_name,
-            version=version,
-            stage="Production",
-            archive_existing_versions=True
-        )
+            
+            # Update model metadata in database
+            await conn.execute(
+                """
+                UPDATE training.model_performance 
+                SET stage = $1, updated_at = $2
+                WHERE model_name = $3 AND version = $4
+                """,
+                "Production", datetime.now(), model_name, version
+            )
         
         return {
             "status": "success",

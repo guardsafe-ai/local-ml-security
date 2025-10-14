@@ -10,6 +10,7 @@ from models.requests import DataUploadRequest, MultipleDataUploadRequest
 from models.responses import DataUploadResult, DataStatistics, SuccessResponse
 from efficient_data_manager import DataType
 from shared_data_manager import shared_data_manager
+from utils.data_quality_gates import DataQualityValidator, QualityThresholds, create_quality_thresholds_for_model_type
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -258,3 +259,98 @@ async def create_sample_data():
     except Exception as e:
         logger.error(f"Failed to create sample data: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/validate-quality")
+async def validate_data_quality(
+    texts: List[str],
+    labels: List[str],
+    model_type: str = "security_classification",
+    custom_thresholds: Optional[Dict[str, Any]] = None
+):
+    """Validate data quality using configurable quality gates"""
+    try:
+        logger.info(f"🔍 [QUALITY] Validating data quality for {len(texts)} samples")
+        
+        # Create quality thresholds
+        if custom_thresholds:
+            thresholds = QualityThresholds(**custom_thresholds)
+        else:
+            thresholds = create_quality_thresholds_for_model_type(model_type)
+        
+        # Validate data quality
+        validator = DataQualityValidator(thresholds)
+        results = validator.validate_dataset(
+            texts=texts,
+            labels=labels,
+            dataset_name="validation_request"
+        )
+        
+        return {
+            "validation_passed": results["validation_passed"],
+            "errors": results["errors"],
+            "warnings": results["warnings"],
+            "metrics": results["metrics"],
+            "recommendations": results["recommendations"],
+            "thresholds_used": {
+                "max_imbalance_ratio": thresholds.max_imbalance_ratio,
+                "min_class_samples": thresholds.min_class_samples,
+                "max_duplicate_rate": thresholds.max_duplicate_rate,
+                "max_text_length": thresholds.max_text_length
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Error validating data quality: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/quality-thresholds/{model_type}")
+async def get_quality_thresholds(model_type: str):
+    """Get quality thresholds for a specific model type"""
+    try:
+        thresholds = create_quality_thresholds_for_model_type(model_type)
+        
+        return {
+            "model_type": model_type,
+            "thresholds": {
+                "max_imbalance_ratio": thresholds.max_imbalance_ratio,
+                "min_class_samples": thresholds.min_class_samples,
+                "max_class_samples": thresholds.max_class_samples,
+                "max_duplicate_rate": thresholds.max_duplicate_rate,
+                "max_exact_duplicates": thresholds.max_exact_duplicates,
+                "min_text_length": thresholds.min_text_length,
+                "max_text_length": thresholds.max_text_length,
+                "min_unique_words": thresholds.min_unique_words,
+                "max_avg_text_length": thresholds.max_avg_text_length,
+                "max_missing_rate": thresholds.max_missing_rate,
+                "min_total_samples": thresholds.min_total_samples,
+                "max_total_samples": thresholds.max_total_samples,
+                "min_label_length": thresholds.min_label_length,
+                "max_label_length": thresholds.max_label_length,
+                "allowed_labels": thresholds.allowed_labels,
+                "max_outlier_ratio": thresholds.max_outlier_ratio,
+                "min_variance": thresholds.min_variance
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting quality thresholds: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/quality-thresholds/custom")
+async def set_custom_quality_thresholds(thresholds: Dict[str, Any]):
+    """Set custom quality thresholds"""
+    try:
+        # Validate the thresholds
+        custom_thresholds = QualityThresholds(**thresholds)
+        
+        logger.info(f"✅ [QUALITY] Custom thresholds set: {thresholds}")
+        
+        return {
+            "status": "success",
+            "message": "Custom quality thresholds set successfully",
+            "thresholds": thresholds
+        }
+        
+    except Exception as e:
+        logger.error(f"Error setting custom quality thresholds: {e}")
+        raise HTTPException(status_code=400, detail=f"Invalid thresholds: {str(e)}")

@@ -9,11 +9,20 @@ import asyncio
 import json
 import logging
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Optional, Any, Union
+from typing import List, Dict, Optional, Any, Union, Callable
 import warnings
-warnings.filterwarnings("ignore")
+# Configure basic logging first
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Targeted warning suppression - only suppress specific warnings that are expected
+warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
+warnings.filterwarnings("ignore", category=FutureWarning, module="torch")
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="sklearn")
+logger.debug("🔇 [WARNINGS] Applied targeted warning filters for transformers, torch, and sklearn")
 
 import mlflow
 import mlflow.pytorch
@@ -34,21 +43,41 @@ import redis
 import torch
 from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
 
-# Configure logging first
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
 # Import dynamic batching
 from services.dynamic_batching import DynamicBatcher, BatchConfig
 
 # Import audit logging
 from services.audit_logger import AuditLogger, AuditEventType, AuditSeverity
 
+# Import service-specific enhanced logging
+from utils.enhanced_logging import get_model_api_logger, log_model_api_error, log_model_api_prediction
+
+# Note: Structured logging will be implemented later
+# For now, using basic logging
+
+# Import service-specific circuit breaker
+from utils.circuit_breaker import get_redis_breaker, get_mlflow_breaker, get_external_api_breaker
+
 # Import shared storage
 from services.shared_storage import SharedModelStorage
 
+# Import prediction logger
+from services.prediction_logger import PredictionLogger
+
 # Import health routes
-from routes.health import router as health_router
+from routes.health import router as health_router, set_service_start_time, set_startup_complete, set_ready_state
+
+# Import tracing middleware
+from middleware.tracing import TracingMiddleware, inject_trace_context, create_span
+
+# Import performance middleware
+from middleware.performance import PerformanceMonitoringMiddleware
+
+# Import audit logging middleware
+from middleware.audit_logging import AuditLoggingMiddleware, audit_logger
+
+# Note: Comprehensive metrics will be implemented later
+# For now, using basic Prometheus metrics
 
 # Device detection and configuration with robust fallback
 def setup_device():
@@ -117,7 +146,7 @@ def get_actual_model_size_from_cache(model_name: str) -> Optional[float]:
     """Get actual model size from model-cache service if available"""
     try:
         import requests
-        cache_url = "http://model-cache:8002"
+        cache_url = "http://model-cache:8003"
         
         # Try to get model info from cache
         response = requests.get(f"{cache_url}/models/{model_name}/info", timeout=5)
@@ -705,8 +734,18 @@ class ModelManager:
         self._cache_warming_enabled = True
         self._preload_priority_models = ["distilbert", "bert-base"]  # High-priority models to preload
         
-        # Setup MLflow
-        mlflow.set_tracking_uri("http://mlflow:5000")
+        # Circuit breakers for external services
+        self._circuit_breakers = {
+            "business_metrics": get_external_api_breaker("business_metrics"),
+            "analytics": get_external_api_breaker("analytics"),
+            "redis": get_redis_breaker(),
+            "mlflow": get_mlflow_breaker()
+        }
+        
+        # Enhanced logging
+        self.enhanced_logger = get_model_api_logger("1.0.0")
+        
+        # Note: Structured logging will be implemented later
         
         # Model configurations - Using Hugging Face model IDs (starting with smaller models)
         self.model_configs = {
@@ -731,6 +770,47 @@ class ModelManager:
                 "priority": 4
             }
         }
+        
+        # Setup MLflow
+        mlflow.set_tracking_uri("http://mlflow:5000")
+        
+        logger.info("🤖 [MODEL_API] ModelManager initialized with circuit breakers and enhanced logging")
+    
+    async def _send_business_metrics(self, metrics_data: Dict[str, Any]):
+        """Send business metrics with circuit breaker protection"""
+        from utils.http_client import business_metrics_client
+        from utils.retry import http_retry
+        
+        @http_retry
+        async def _send():
+            await business_metrics_client.post(
+                "http://business-metrics:8004/metrics/prediction",
+                json=metrics_data
+            )
+        
+        await _send()
+    
+    async def _send_analytics_metrics(self, analytics_data: Dict[str, Any]):
+        """Send analytics metrics with circuit breaker protection"""
+        from utils.http_client import analytics_client
+        from utils.retry import http_retry
+        
+        @http_retry
+        async def _send():
+            await analytics_client.post(
+                "http://analytics:8006/metrics/prediction",
+                json=analytics_data
+            )
+        
+        await _send()
+    
+    async def _redis_operation(self, operation: Callable, *args, **kwargs):
+        """Execute Redis operation with circuit breaker protection"""
+        return await self._circuit_breakers["redis"].call(operation, *args, **kwargs)
+    
+    async def _mlflow_operation(self, operation: Callable, *args, **kwargs):
+        """Execute MLflow operation with circuit breaker protection"""
+        return await self._circuit_breakers["mlflow"].call(operation, *args, **kwargs)
         
         # Models will be loaded on-demand when needed
         # self._load_models()
@@ -1232,44 +1312,116 @@ class ModelManager:
     
     def predict_single(self, text: str, model_name: str) -> Dict[str, Any]:
         """Make prediction using a single model"""
-        logger.info(f"predict_single called with model_name: {model_name}")
-        if model_name not in self.models:
-            raise ValueError(f"Model {model_name} not found")
+        request_id = str(uuid.uuid4())
+        start_time = time.time()
         
-        model = self.models[model_name]
-        logger.info(f"Model {model_name} found, loaded: {model.loaded}")
-        if not model.loaded:
-            raise ValueError(f"Model {model_name} not loaded")
+        # Log operation start
+        logger.info(f"Starting prediction for model {model_name}, request_id: {request_id}")
         
-        # Use the actual model for prediction
-        logger.info(f"Using actual model prediction for {model_name}")
         try:
-            result = model.predict(text)
-            logger.info(f"✅ [PREDICTION RESULT] Prediction: {result['prediction']}")
-            logger.info(f"📊 [CONFIDENCE] Confidence: {result['confidence']}")
-            return result
+            logger.info(f"predict_single called with model_name: {model_name}")
+            
+            # Input validation to prevent OOM errors
+            MAX_INPUT_LENGTH = 10000  # characters
+            MIN_INPUT_LENGTH = 1
+            
+            if not text or not isinstance(text, str):
+                raise ValueError("Input text must be a non-empty string")
+            
+            if len(text) < MIN_INPUT_LENGTH:
+                raise ValueError(f"Input text too short: {len(text)} characters (minimum: {MIN_INPUT_LENGTH})")
+            
+            if len(text) > MAX_INPUT_LENGTH:
+                raise ValueError(f"Input text too long: {len(text)} characters (maximum: {MAX_INPUT_LENGTH})")
+            
+            # Check for suspicious patterns that might cause issues
+            if text.count('\n') > 1000:  # Too many newlines
+                raise ValueError("Input text contains too many newlines (potential attack)")
+            
+            if text.count(' ') > 5000:  # Too many spaces
+                raise ValueError("Input text contains too many spaces (potential attack)")
+            
+            logger.debug(f"✅ [INPUT VALIDATION] Text length: {len(text)} chars, model: {model_name}")
+            
+            if model_name not in self.models:
+                raise ValueError(f"Model {model_name} not found")
+            
+            model = self.models[model_name]
+            logger.info(f"Model {model_name} found, loaded: {model.loaded}")
+            if not model.loaded:
+                raise ValueError(f"Model {model_name} not loaded")
+        
+            # Use the actual model for prediction
+            logger.info(f"Using actual model prediction for {model_name}")
+            try:
+                result = model.predict(text)
+                
+                # Calculate processing time
+                processing_time_ms = (time.time() - start_time) * 1000
+                
+                # Record metrics
+                PREDICTION_REQUESTS.labels(model_name=model_name).inc()
+                PREDICTION_LATENCY.labels(model_name=model_name).observe(time.time() - start_time)
+                
+                # Record prediction distribution (commented out due to duplicate metric)
+                # if 'confidence' in result:
+                #     PREDICTION_DISTRIBUTION.labels(
+                #         model_name=model_name, 
+                #         prediction_class=result.get('prediction', 'unknown')
+                #     ).observe(result['confidence'])
+                
+                logger.info(f"✅ [PREDICTION RESULT] Prediction: {result['prediction']}")
+                logger.info(f"📊 [CONFIDENCE] Confidence: {result['confidence']}")
+                
+                # Log successful operation
+                logger.info(f"Prediction completed for {model_name}: {result.get('prediction')} (confidence: {result.get('confidence')})")
+                
+                return result
+                
+            except Exception as e:
+                processing_time_ms = (time.time() - start_time) * 1000
+                
+                # Log error with enhanced context
+                self.enhanced_logger.log_error_with_context(
+                    error=e,
+                    operation=f"predict_single_{model_name}",
+                    service_name="model-api",
+                    request_id=request_id,
+                    model_name=model_name,
+                    additional_context={
+                        "text_length": len(text),
+                        "processing_time_ms": processing_time_ms,
+                        "model_loaded": model.loaded if model else False
+                    }
+                )
+                
+                logger.error(f"❌ [CRITICAL] Model {model_name} prediction failed: {e}")
+                
+                # Record model failure metrics
+                MODEL_LOAD_FAILURES.labels(model_name=model_name, error_type=type(e).__name__).inc()
+                
+                # Raise proper error instead of dangerous fallback
+                raise ValueError(f"Model {model_name} prediction failed: {str(e)}")
+        
         except Exception as e:
-            from utils.enhanced_logging import log_error_with_context
-            log_error_with_context(
+            processing_time_ms = (time.time() - start_time) * 1000
+            
+            # Log error with enhanced context
+            self.enhanced_logger.log_error_with_context(
                 error=e,
-                operation="model_prediction",
+                operation=f"predict_single_{model_name}",
+                service_name="model-api",
+                request_id=request_id,
                 model_name=model_name,
-                additional_context={"text_length": len(text), "use_cache": use_cache}
+                additional_context={
+                    "text_length": len(text),
+                    "processing_time_ms": processing_time_ms,
+                    "validation_failed": True
+                }
             )
-            # Fallback to simple prediction if model fails
-            logger.warning(f"Using fallback prediction for {model_name}")
-            return {
-                "prediction": "prompt_injection",
-                "confidence": 0.95,
-                "probabilities": {
-                    "prompt_injection": 0.95,
-                    "jailbreak": 0.02,
-                    "system_extraction": 0.01,
-                    "code_injection": 0.01,
-                    "benign": 0.01
-                },
-                "processing_time_ms": 10.0
-            }
+            
+            # Re-raise the exception
+            raise
     
     def predict_ensemble(self, text: str, models: Optional[List[str]] = None) -> Dict[str, Any]:
         """Make prediction using ensemble of models"""
@@ -1581,8 +1733,26 @@ class ModelManager:
             model_name: Name of the model (e.g., 'distilbert_trained', 'distilbert_pretrained')
             version: Optional version for trained models (e.g., '1', '2', 'latest', 'staging')
         """
+        import os
+        
+        ENV = os.getenv("ENVIRONMENT", "development")
+        
+        # Enforce version pinning in production
+        if ENV == "production" and (version is None or version == "latest"):
+            raise ValueError(
+                "Model version must be explicitly specified in production. "
+                "Using 'latest' or None is not allowed for safety."
+            )
+        
         start_time = time.time()
         try:
+            # Log version access for audit trail
+            try:
+                # This would need database access - for now just log
+                logger.info(f"Model access: {model_name} v{version} in {ENV}")
+            except Exception as e:
+                logger.warning(f"Failed to log model access: {e}")
+            
             # Validate model before loading
             if not await self.validate_model_before_load(model_name, version):
                 error_msg = f"Model validation failed for {model_name}"
@@ -1708,6 +1878,10 @@ class ModelManager:
                 })
                 
                 logger.info(f"✅ Successfully loaded model: {model_name}")
+                
+                # Log model lifecycle event
+                logger.info(f"Model {model_name} v{version} loaded successfully")
+                
                 return True
             else:
                 error_msg = f"Failed to load model: {model_name}"
@@ -1887,6 +2061,11 @@ class ModelManager:
 # FastAPI application
 app = FastAPI(title="Model API Service", version="1.0.0")
 
+# Initialize graceful shutdown handler
+from utils.graceful_shutdown import GracefulShutdown
+shutdown_handler = GracefulShutdown(app)
+shutdown_handler.register_handlers()
+
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -1895,6 +2074,15 @@ app.add_middleware(
     allow_methods=["*"],  # Allow all methods
     allow_headers=["*"],  # Allow all headers
 )
+
+# Add tracing middleware
+app.add_middleware(TracingMiddleware)
+
+# Add performance monitoring middleware
+app.add_middleware(PerformanceMonitoringMiddleware)
+
+# Add audit logging middleware
+app.add_middleware(AuditLoggingMiddleware, audit_logger=audit_logger)
 
 # Set up distributed tracing
 tracer = setup_tracing("model-api", app)
@@ -1910,6 +2098,11 @@ ACTIVE_MODELS = Gauge('model_api_active_models', 'Number of active models')
 # Business metrics
 SECURITY_THREAT_COUNT = Counter('security_threats_detected_total', 'Total security threats detected', ['threat_type', 'model_name'])
 PREDICTION_CONFIDENCE = Histogram('prediction_confidence', 'Prediction confidence distribution', ['model_name'], buckets=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])
+
+# Enhanced ML Metrics
+PREDICTION_REQUESTS = Counter('prediction_requests_total', 'Total prediction requests', ['model_name'])
+PREDICTION_LATENCY = Histogram('prediction_latency_seconds', 'Prediction latency', ['model_name'])
+# PREDICTION_DISTRIBUTION = Histogram('prediction_distribution', 'Distribution of prediction confidences', ['model_name', 'prediction_class'], buckets=[0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])  # Duplicate removed
 ENSEMBLE_PREDICTIONS = Counter('ensemble_predictions_total', 'Total ensemble predictions', ['model_count', 'status'])
 CACHE_PERFORMANCE = Counter('cache_operations_total', 'Cache operations', ['operation', 'result'])
 INPUT_SANITIZATION = Counter('input_sanitization_total', 'Input sanitization operations', ['action', 'result'])
@@ -1923,6 +2116,14 @@ DRIFT_DETECTION_FAILURES = Counter('drift_detection_failures_total', 'Drift dete
 MODEL_PROMOTION_DECISIONS = Counter('model_promotion_decisions_total', 'Model promotion decisions', ['model_name', 'decision', 'reason'])
 TRAINING_DATA_PIPELINE_ERRORS = Counter('training_data_pipeline_errors_total', 'Data pipeline errors', ['pipeline_stage', 'error_type'])
 ML_OPERATION_DURATION = Histogram('ml_operation_duration_seconds', 'ML operation duration', ['operation_type', 'model_name'], buckets=[0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0])
+
+# Enhanced ML Metrics
+CALIBRATION_ERROR = Gauge('model_calibration_error', 'Model calibration error (ECE)', ['model_name', 'version'])
+ROC_AUC_SCORE = Gauge('model_roc_auc', 'ROC AUC score', ['model_name', 'version'])
+PR_AUC_SCORE = Gauge('model_pr_auc', 'Precision-Recall AUC score', ['model_name', 'version'])
+CONFUSION_MATRIX = Counter('confusion_matrix_total', 'Confusion matrix entries', ['model_name', 'true_label', 'predicted_label'])
+# PREDICTION_DISTRIBUTION = Histogram('prediction_distribution', 'Distribution of prediction confidences', ['model_name', 'prediction_class'], buckets=[0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])  # Duplicate removed
+MODEL_CALIBRATION_SCORE = Gauge('model_calibration_score', 'Model calibration score (Brier score)', ['model_name', 'version'])
 
 # Include health router
 app.include_router(health_router)
@@ -1950,7 +2151,7 @@ async def batch_inference_function(texts: List[str], batch_requests: List) -> Li
             start_time = req.metadata.get("start_time", time.time()) if req.metadata else time.time()
             
             # Execute prediction
-            result = await _execute_prediction(text, models, ensemble, start_time)
+            result = await _execute_prediction(text, models, ensemble, start_time, True)
             results.append(result)
             
         except Exception as e:
@@ -1971,10 +2172,16 @@ audit_logger = AuditLogger()
 # Initialize shared storage
 shared_storage = SharedModelStorage()
 
+# Initialize prediction logger
+prediction_logger = PredictionLogger()
+
 @app.on_event("startup")
 async def startup_event():
     """Initialize service on startup"""
     logger.info("Starting Model API Service...")
+    
+    # Set service start time for health checks
+    set_service_start_time()
     
     # Initialize shared HTTP client
     try:
@@ -1997,6 +2204,10 @@ async def startup_event():
     except Exception as e:
         logger.error(f"❌ Failed to start model preloading: {e}")
     
+    # Note: Service info will be updated later with comprehensive metrics
+    
+    # Mark startup as complete
+    set_startup_complete()
     logger.info("Service ready - models will be loaded on-demand and preloaded in background")
 
 @app.on_event("shutdown")
@@ -2004,19 +2215,8 @@ async def shutdown_event():
     """Cleanup on shutdown"""
     logger.info("Shutting down Model API Service...")
     
-    # Close shared HTTP client
-    try:
-        await close_http_client()
-        logger.info("✅ Shared HTTP client closed")
-    except Exception as e:
-        logger.error(f"❌ Error closing HTTP client: {e}")
-    
-    # Close prediction logger
-    try:
-        await prediction_logger.close()
-        logger.info("✅ Prediction logger closed")
-    except Exception as e:
-        logger.error(f"❌ Error closing prediction logger: {e}")
+    # Use graceful shutdown handler
+    await shutdown_handler.shutdown_handler(None, None)
     
     logger.info("Model API Service shutdown complete")
 
@@ -2083,75 +2283,56 @@ async def test_predict(request: PredictionRequest):
 @app.get("/models")
 async def list_models():
     """List all available models"""
-    models = {}
-    
-    # Get all configured models (both loaded and unloaded)
-    for base_model_name in model_manager.model_configs.keys():
-        try:
-            # Create both pretrained and trained variants
-            pretrained_name = f"{base_model_name}_pretrained"
-            trained_name = f"{base_model_name}_trained"
-            
-            # Check pretrained variant
-            if pretrained_name in model_manager.models and model_manager.models[pretrained_name].loaded:
-                # Model is loaded, get full info
-                model_info = model_manager.get_model_info(pretrained_name).dict()
-                model_info["description"] = f"Pre-trained {base_model_name} model for ML security classification"
-                # Calculate model size
-                model_info["size_gb"] = get_model_size_gb(model_info.get("path", ""), model_info.get("model_source", "Hugging Face"), model_info.get("loaded", False), pretrained_name)
-                models[pretrained_name] = model_info
-            else:
-                # Model is configured but not loaded, return basic info
-                config = model_manager.model_configs[base_model_name]
-                model_path = config["path"]
-                model_source = "Hugging Face"
-                models[pretrained_name] = {
-                    "name": pretrained_name,
-                    "type": config["type"],
-                    "loaded": False,
-                    "path": model_path,
-                    "labels": ["prompt_injection", "jailbreak", "system_extraction", "code_injection", "benign"],
-                    "performance": None,
-                    "model_source": model_source,
-                    "model_version": "pre-trained",
-                    "description": f"Pre-trained {base_model_name} model for ML security classification",
-                    "size_gb": get_model_size_gb(model_path, model_source, False, pretrained_name)
-                }
-            
-            # Check trained variant (if it exists in MLflow)
-            if trained_name in model_manager.models and model_manager.models[trained_name].loaded:
-                # Model is loaded, get full info
-                model_info = model_manager.get_model_info(trained_name).dict()
-                model_info["description"] = f"Trained {base_model_name} model for ML security classification"
-                # Calculate model size
-                model_info["size_gb"] = get_model_size_gb(model_info.get("path", ""), model_info.get("model_source", "MLflow"), False, trained_name)
-                models[trained_name] = model_info
-            else:
-                # Check if trained model exists in MLflow
-                mlflow_models = model_manager.get_mlflow_models()
-                if any(trained_name in model for model in mlflow_models):
-                    model_path = f"models:/{trained_name}/latest"
-                    model_source = "MLflow"
-                    models[trained_name] = {
+    try:
+        models = {}
+        
+        # Get all configured models (both loaded and unloaded)
+        for base_model_name in model_manager.model_configs.keys():
+            try:
+                # Create both pretrained and trained variants
+                pretrained_name = f"{base_model_name}_pretrained"
+                trained_name = f"{base_model_name}_trained"
+                
+                # Check if models are loaded
+                pretrained_loaded = pretrained_name in model_manager.models
+                trained_loaded = trained_name in model_manager.models
+                
+                # Get model info
+                pretrained_info = model_manager.models.get(pretrained_name, {})
+                trained_info = model_manager.models.get(trained_name, {})
+                
+                models[base_model_name] = {
+                    "pretrained": {
+                        "name": pretrained_name,
+                        "loaded": pretrained_loaded,
+                        "version": pretrained_info.get("version", "unknown"),
+                        "size_mb": pretrained_info.get("size_mb", 0),
+                        "memory_usage_mb": pretrained_info.get("memory_usage_mb", 0)
+                    },
+                    "trained": {
                         "name": trained_name,
-                        "type": config["type"],
-                        "loaded": False,
-                        "path": model_path,
-                        "labels": ["prompt_injection", "jailbreak", "system_extraction", "code_injection", "benign"],
-                        "performance": None,
-                        "model_source": model_source,
-                        "model_version": "trained",
-                        "description": f"Trained {base_model_name} model for ML security classification",
-                        "size_gb": get_model_size_gb(model_path, model_source, False, pretrained_name)
+                        "loaded": trained_loaded,
+                        "version": trained_info.get("version", "unknown"),
+                        "size_mb": trained_info.get("size_mb", 0),
+                        "memory_usage_mb": trained_info.get("memory_usage_mb", 0)
                     }
-        except Exception as e:
-            models[base_model_name] = {"error": str(e)}
-    
-    return {
-        "models": models,
-        "available_models": model_manager.get_available_models(),
-        "mlflow_models": model_manager.get_mlflow_models()
-    }
+                }
+            except Exception as e:
+                logger.error(f"Error processing model {base_model_name}: {e}")
+                models[base_model_name] = {
+                    "pretrained": {"name": f"{base_model_name}_pretrained", "loaded": False, "error": str(e)},
+                    "trained": {"name": f"{base_model_name}_trained", "loaded": False, "error": str(e)}
+                }
+        
+        return {
+            "models": models,
+            "total_models": len(models),
+            "loaded_models": sum(1 for model in models.values() if model["pretrained"]["loaded"] or model["trained"]["loaded"]),
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error listing models: {e}")
+        return {"error": str(e)}
 
 @app.get("/models/{model_name}")
 async def get_model_info(model_name: str):
@@ -2297,6 +2478,10 @@ async def predict(request: PredictionRequest):
             logger.error(f"❌ Input sanitization error: {e}")
             raise HTTPException(status_code=400, detail="Input validation failed")
         
+        # Log prediction request
+        request_id = str(uuid.uuid4())
+        logger.info(f"Prediction request: models={request.models}, ensemble={request.ensemble}, text_length={len(sanitized_text)}")
+        
         logger.info(f"🎯 [PREDICTION REQUEST] Received prediction request")
         logger.info(f"📝 [TEXT] Text: '{sanitized_text[:100]}{'...' if len(sanitized_text) > 100 else ''}'")
         logger.info(f"🤖 [MODELS] Requested models: {request.models}")
@@ -2345,7 +2530,7 @@ async def predict(request: PredictionRequest):
             # Fallback to direct prediction
             prediction_timeout = 30  # 30 seconds timeout
             result = await asyncio.wait_for(
-                _execute_prediction(sanitized_text, request.models, request.ensemble, start_time),
+                _execute_prediction(sanitized_text, request.models, request.ensemble, start_time, request.return_probabilities),
                 timeout=prediction_timeout
             )
         
@@ -2392,6 +2577,32 @@ async def predict(request: PredictionRequest):
 @app.post("/predict/batch")
 async def predict_batch(requests: List[PredictionRequest]):
     """Make predictions on multiple texts using dynamic batching"""
+    
+    # Input validation for batch requests
+    MAX_BATCH_SIZE = 100
+    MAX_INPUT_LENGTH = 10000
+    
+    if len(requests) > MAX_BATCH_SIZE:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Batch size too large: {len(requests)} (maximum: {MAX_BATCH_SIZE})"
+        )
+    
+    # Validate each request in the batch
+    for i, request in enumerate(requests):
+        if not request.text or not isinstance(request.text, str):
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Request {i}: Input text must be a non-empty string"
+            )
+        
+        if len(request.text) > MAX_INPUT_LENGTH:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Request {i}: Input text too long: {len(request.text)} characters (maximum: {MAX_INPUT_LENGTH})"
+            )
+    
+    logger.info(f"✅ [BATCH VALIDATION] Processing {len(requests)} valid requests")
     try:
         start_time = time.time()
         
@@ -2489,7 +2700,7 @@ async def predict_batch(requests: List[PredictionRequest]):
         logger.error(f"❌ [BATCH] Error in batch prediction: {e}")
         raise HTTPException(status_code=500, detail=f"Batch prediction failed: {str(e)}")
 
-async def _execute_prediction(text: str, models: List[str], ensemble: bool, start_time: float):
+async def _execute_prediction(text: str, models: List[str], ensemble: bool, start_time: float, return_probabilities: bool = True):
     """Execute prediction logic with proper error handling"""
     try:
         if models and len(models) > 0:
@@ -2619,15 +2830,15 @@ async def _execute_prediction(text: str, models: List[str], ensemble: bool, star
         try:
             await prediction_logger.log_prediction(
                 model_name=model_name if 'model_name' in locals() else "ensemble",
-                input_text=request.text,
+                input_text=text,
                 prediction=str(result["prediction"]),
                 confidence=float(result["confidence"]),
                 processing_time_ms=float(total_processing_time),
                 from_cache=cache_result is not None,
                 metadata={
                     "ensemble_used": bool(result["ensemble_used"]),
-                    "models_used": request.models if request.models else ["auto_selected"],
-                    "probabilities": dict(result["probabilities"]) if request.return_probabilities else {}
+                    "models_used": models if models else ["auto_selected"],
+                    "probabilities": dict(result["probabilities"]) if return_probabilities else {}
                 }
             )
         except Exception as e:
@@ -2655,10 +2866,10 @@ async def _execute_prediction(text: str, models: List[str], ensemble: bool, star
         
         # Return a simplified response to avoid circular references
         return {
-            "text": request.text,
+            "text": text,
             "prediction": str(result["prediction"]),
             "confidence": float(result["confidence"]),
-            "probabilities": dict(result["probabilities"]) if request.return_probabilities else {},
+            "probabilities": dict(result["probabilities"]) if return_probabilities else {},
             "model_predictions": model_predictions,
             "ensemble_used": bool(result["ensemble_used"]),
             "processing_time_ms": float(total_processing_time),
@@ -3189,6 +3400,45 @@ model_api_service_up 1
     except Exception as e:
         logger.error(f"Error getting metrics: {e}")
         return Response(content="# Error getting metrics\n", media_type="text/plain")
+
+@app.get("/circuit-breaker/status")
+async def get_circuit_breaker_status():
+    """Get circuit breaker status"""
+    try:
+        # Get circuit breaker states from ModelManager
+        states = {}
+        for name, breaker in model_manager._circuit_breakers.items():
+            states[name] = breaker.get_state()
+        return states
+    except Exception as e:
+        logger.error(f"Error getting circuit breaker status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/circuit-breaker/reset/{breaker_name}")
+async def reset_circuit_breaker(breaker_name: str):
+    """Reset a specific circuit breaker"""
+    try:
+        # Reset specific circuit breaker
+        if breaker_name in model_manager._circuit_breakers:
+            model_manager._circuit_breakers[breaker_name].reset()
+        else:
+            raise ValueError(f"Circuit breaker '{breaker_name}' not found")
+        return {"message": f"Circuit breaker '{breaker_name}' reset successfully"}
+    except Exception as e:
+        logger.error(f"Error resetting circuit breaker: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/circuit-breaker/reset-all")
+async def reset_all_circuit_breakers():
+    """Reset all circuit breakers"""
+    try:
+        # Reset all circuit breakers
+        for breaker in model_manager._circuit_breakers.values():
+            breaker.reset()
+        return {"message": "All circuit breakers reset successfully"}
+    except Exception as e:
+        logger.error(f"Error resetting circuit breakers: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn

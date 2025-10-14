@@ -240,7 +240,6 @@ config = {
 
 ### 1. Authentication & Authorization
 - **API Key Management**: Service-to-service authentication
-- **JWT Tokens**: User authentication and authorization
 - **Role-Based Access**: Granular permission management
 - **Rate Limiting**: Request rate limiting and throttling
 

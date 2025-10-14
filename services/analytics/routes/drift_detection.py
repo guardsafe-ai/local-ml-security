@@ -5,6 +5,7 @@ API endpoints for drift detection functionality
 
 import logging
 import pandas as pd
+import json
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
@@ -28,6 +29,12 @@ class ModelDriftRequest(BaseModel):
     """Request model for model drift detection"""
     current_predictions: List[Dict[str, Any]]
     reference_predictions: Optional[List[Dict[str, Any]]] = None
+
+class BaselineRequest(BaseModel):
+    """Request model for baseline establishment"""
+    model_name: str
+    reference_data: Optional[List[Dict[str, Any]]] = None
+    hours: Optional[int] = 168  # 7 days default
     current_labels: Optional[List[str]] = None
     reference_labels: Optional[List[str]] = None
 
@@ -344,6 +351,8 @@ async def check_drift_and_retrain(request: CheckAndRetrainRequest):
     This is the main endpoint for production drift monitoring with auto-remediation
     """
     try:
+        from database.connection import db_manager
+        
         # Convert data to DataFrame
         current_df = pd.DataFrame(request.current_data)
         reference_df = pd.DataFrame(request.reference_data) if request.reference_data else None
@@ -358,10 +367,27 @@ async def check_drift_and_retrain(request: CheckAndRetrainRequest):
         if "error" in drift_results:
             raise HTTPException(status_code=400, detail=drift_results["error"])
         
-        # Get model predictions for performance comparison
-        model_performance_drift = None
-        if request.model_name:
-            try:
+        # Use transaction for drift detection and retraining operations
+        async with db_manager.transaction() as conn:
+            # Store drift detection results
+            drift_id = await conn.fetchval(
+                """
+                INSERT INTO analytics.drift_detections 
+                (model_name, drift_score, drift_type, detected_at, details)
+                VALUES ($1, $2, $3, $4, $5)
+                RETURNING id
+                """,
+                request.model_name,
+                drift_results.get("overall_drift_score", 0.0),
+                "data_drift",
+                datetime.now(),
+                json.dumps(drift_results)
+            )
+            
+            # Get model predictions for performance comparison
+            model_performance_drift = None
+            if request.model_name:
+                try:
                 # Get predictions from current model
                 import httpx
                 async with httpx.AsyncClient() as client:
@@ -387,15 +413,30 @@ async def check_drift_and_retrain(request: CheckAndRetrainRequest):
                                 new_model_predictions=current_predictions,
                                 ground_truth=None  # No ground truth available in drift detection
                             )
-            except Exception as e:
-                logger.warning(f"Could not get model predictions for drift detection: {e}")
-        
-        # Check if retraining should be triggered
-        retrain_result = await drift_detector.trigger_retraining_if_drift(
-            drift_results=drift_results,
-            model_name=request.model_name,
-            training_data_path=request.training_data_path
-        )
+                except Exception as e:
+                    logger.warning(f"Could not get model predictions for drift detection: {e}")
+            
+            # Check if retraining should be triggered
+            retrain_result = await drift_detector.trigger_retraining_if_drift(
+                drift_results=drift_results,
+                model_name=request.model_name,
+                training_data_path=request.training_data_path
+            )
+            
+            # If retraining was triggered, log the event
+            if retrain_result.get("retraining_triggered"):
+                await conn.execute(
+                    """
+                    INSERT INTO analytics.retrain_events 
+                    (model_name, trigger_reason, drift_id, job_id, created_at)
+                    VALUES ($1, $2, $3, $4, $5)
+                    """,
+                    request.model_name,
+                    "drift_detected",
+                    drift_id,
+                    retrain_result.get("job_id"),
+                    datetime.now()
+                )
         
         return {
             "drift_detection": drift_results,
@@ -829,4 +870,80 @@ async def detect_drift_with_production_data(
         raise
     except Exception as e:
         logger.error(f"❌ [DRIFT] Failed to detect drift with production data: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/baseline/establish")
+async def establish_baseline(request: BaselineRequest):
+    """Establish baseline metrics for drift detection"""
+    try:
+        logger.info(f"📊 [BASELINE] Establishing baseline for {request.model_name}")
+        
+        # Convert reference data to DataFrame if provided
+        reference_data = None
+        if request.reference_data:
+            reference_data = pd.DataFrame(request.reference_data)
+        
+        # Establish baseline
+        result = await drift_detector.establish_baseline(
+            model_name=request.model_name,
+            reference_data=reference_data
+        )
+        
+        if result["status"] == "error":
+            raise HTTPException(status_code=500, detail=result["error"])
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error establishing baseline: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/baseline/status/{model_name}")
+async def get_baseline_status(model_name: str):
+    """Get baseline status for a model"""
+    try:
+        status = drift_detector.get_baseline_status(model_name)
+        return status
+        
+    except Exception as e:
+        logger.error(f"Error getting baseline status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/baseline/list")
+async def list_baselines():
+    """List all established baselines"""
+    try:
+        baselines = {}
+        for model_name in drift_detector.baseline_metrics.keys():
+            baselines[model_name] = drift_detector.get_baseline_status(model_name)
+        
+        return {
+            "baselines": baselines,
+            "total_count": len(baselines)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error listing baselines: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.delete("/baseline/{model_name}")
+async def delete_baseline(model_name: str):
+    """Delete baseline for a model"""
+    try:
+        if model_name not in drift_detector.baseline_metrics:
+            raise HTTPException(status_code=404, detail=f"Baseline not found for {model_name}")
+        
+        # Remove baseline data
+        del drift_detector.baseline_metrics[model_name]
+        if model_name in drift_detector.reference_data:
+            del drift_detector.reference_data[model_name]
+        
+        logger.info(f"🗑️ [BASELINE] Deleted baseline for {model_name}")
+        
+        return {"message": f"Baseline deleted for {model_name}"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting baseline: {e}")
         raise HTTPException(status_code=500, detail=str(e))

@@ -19,15 +19,6 @@ The Analytics Service is the **central intelligence hub** of the ML Security pla
 http://analytics:8001
 ```
 
-### Authentication
-All endpoints require authentication headers:
-```javascript
-headers: {
-  'Authorization': 'Bearer <token>',
-  'Content-Type': 'application/json'
-}
-```
-
 ### Core Analytics Endpoints
 
 #### `GET /analytics/trends`

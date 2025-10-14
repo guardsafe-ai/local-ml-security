@@ -19,14 +19,6 @@ The Model API Service is the **high-performance inference engine** of the ML Sec
 http://model-api:8000
 ```
 
-### Authentication
-All endpoints require authentication headers:
-```javascript
-headers: {
-  'Authorization': 'Bearer <token>',
-  'Content-Type': 'application/json'
-}
-```
 
 ### Core Prediction Endpoints
 

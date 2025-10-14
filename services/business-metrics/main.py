@@ -7,6 +7,7 @@ Enterprise-grade metrics collection and analytics for ML operations
 import asyncio
 import logging
 import os
+import signal
 import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
@@ -153,30 +154,89 @@ class BusinessMetricsService:
             )
     
     async def _flush_metrics(self):
-        """Flush metrics buffer to database"""
+        """Flush metrics buffer to database with transaction management"""
         if not self.metrics_buffer:
             return
         
         try:
+            # Use transaction for batch metric insertion
             async with self.conn_pool.acquire() as conn:
-                await conn.executemany("""
-                    INSERT INTO business_metrics (metric_name, value, timestamp, tags, metadata)
-                    VALUES ($1, $2, $3, $4, $5)
-                """, [
-                    (
-                        metric.metric_name,
-                        metric.value,
-                        metric.timestamp,
-                        json.dumps(metric.tags),
-                        json.dumps(metric.metadata)
-                    ) for metric in self.metrics_buffer
-                ])
+                async with conn.transaction():
+                    # Insert all metrics in a single transaction
+                    for metric in self.metrics_buffer:
+                        await conn.execute(
+                            """
+                            INSERT INTO business_metrics 
+                            (metric_name, value, timestamp, tags, metadata)
+                            VALUES ($1, $2, $3, $4, $5)
+                            """,
+                            metric.metric_name,
+                            metric.value,
+                            metric.timestamp,
+                            json.dumps(metric.tags),
+                            json.dumps(metric.metadata)
+                        )
+                    
+                    # Update metrics summary in the same transaction
+                    await self._update_metrics_summary(conn)
             
-            logger.info(f"✅ Flushed {len(self.metrics_buffer)} metrics to database")
+            # Clear buffer after successful transaction
             self.metrics_buffer.clear()
+            logger.debug(f"✅ Flushed {len(self.metrics_buffer)} metrics to database")
             
         except Exception as e:
-            logger.error(f"❌ Failed to flush metrics: {e}")
+            from utils.enhanced_logging import log_error_with_context
+            log_error_with_context(
+                error=e,
+                operation="flush_business_metrics",
+                additional_context={"buffer_size": len(self.metrics_buffer)}
+            )
+            raise
+    
+    async def _update_metrics_summary(self, conn):
+        """Update metrics summary table within transaction"""
+        try:
+            # Get current time bucket (hourly)
+            current_time = datetime.now()
+            time_bucket = current_time.replace(minute=0, second=0, microsecond=0)
+            
+            # Update summary for each unique metric in buffer
+            metric_names = list(set(metric.metric_name for metric in self.metrics_buffer))
+            
+            for metric_name in metric_names:
+                # Calculate summary statistics
+                metric_values = [m.value for m in self.metrics_buffer if m.metric_name == metric_name]
+                
+                summary_data = {
+                    'count': len(metric_values),
+                    'sum': sum(metric_values),
+                    'avg': sum(metric_values) / len(metric_values),
+                    'min': min(metric_values),
+                    'max': max(metric_values)
+                }
+                
+                # Upsert summary
+                await conn.execute(
+                    """
+                    INSERT INTO metrics_summary 
+                    (metric_name, time_bucket, count_metrics, sum_value, avg_value, min_value, max_value)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    ON CONFLICT (metric_name, time_bucket)
+                    DO UPDATE SET
+                        count_metrics = metrics_summary.count_metrics + $3,
+                        sum_value = metrics_summary.sum_value + $4,
+                        avg_value = (metrics_summary.sum_value + $4) / (metrics_summary.count_metrics + $3),
+                        min_value = LEAST(metrics_summary.min_value, $6),
+                        max_value = GREATEST(metrics_summary.max_value, $7)
+                    """,
+                    metric_name, time_bucket, summary_data['count'], 
+                    summary_data['sum'], summary_data['avg'], 
+                    summary_data['min'], summary_data['max']
+                )
+                
+        except Exception as e:
+            logger.error(f"Error updating metrics summary: {e}")
+            raise
     
     async def _store_in_redis(self, metric: MetricData):
         """Store metric in Redis for real-time access"""
@@ -437,6 +497,86 @@ async def get_metrics_summary():
     except Exception as e:
         logger.error(f"❌ Failed to get metrics summary: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# Graceful shutdown handler
+class GracefulShutdown:
+    """Handles graceful shutdown of the business-metrics service"""
+    
+    def __init__(self, app):
+        self.app = app
+        self.is_shutting_down = False
+        self.shutdown_timeout = 30  # seconds
+        self.pending_tasks = set()
+        logger.info("GracefulShutdown handler initialized for business-metrics service.")
+    
+    def register_handlers(self):
+        """Register signal handlers for graceful shutdown."""
+        if hasattr(signal, 'SIGTERM'):
+            signal.signal(signal.SIGTERM, self.shutdown_handler)
+        if hasattr(signal, 'SIGINT'):
+            signal.signal(signal.SIGINT, self.shutdown_handler)
+        logger.info("Registered SIGTERM and SIGINT handlers for business-metrics service.")
+        
+        @self.app.on_event("shutdown")
+        async def _on_shutdown():
+            await self._perform_cleanup()
+    
+    async def shutdown_handler(self, signum, frame):
+        """Handle shutdown signals."""
+        if self.is_shutting_down:
+            logger.warning("Business-metrics service already in shutdown process, ignoring signal.")
+            return
+        
+        self.is_shutting_down = True
+        logger.info(f"Business-metrics service received signal {signum}, initiating graceful shutdown...")
+        
+        # Trigger FastAPI's shutdown event
+        await self.app.shutdown()
+    
+    async def _perform_cleanup(self):
+        """Perform actual cleanup tasks."""
+        logger.info("Performing graceful shutdown cleanup for business-metrics service...")
+        
+        # Cancel any pending background tasks
+        if self.pending_tasks:
+            logger.info(f"Cancelling {len(self.pending_tasks)} pending background tasks...")
+            for task in list(self.pending_tasks):
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    logger.debug(f"Task {task.get_name()} cancelled.")
+                except Exception as e:
+                    logger.error(f"Error during task cancellation: {e}")
+            self.pending_tasks.clear()
+            logger.info("All pending tasks cancelled.")
+        
+        # Close database connections
+        try:
+            if hasattr(metrics_service, 'conn_pool') and metrics_service.conn_pool:
+                await metrics_service.conn_pool.close()
+                logger.info("Database connection pool closed.")
+        except Exception as e:
+            logger.error(f"Error closing database connections: {e}")
+        
+        # Close Redis connections
+        try:
+            if hasattr(metrics_service, 'redis_client') and metrics_service.redis_client:
+                await metrics_service.redis_client.close()
+                logger.info("Redis client closed.")
+        except Exception as e:
+            logger.error(f"Error closing Redis connections: {e}")
+        
+        logger.info("Business-metrics service graceful shutdown cleanup complete.")
+
+# Initialize graceful shutdown
+shutdown_handler = GracefulShutdown(app)
+shutdown_handler.register_handlers()
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Cleanup on shutdown"""
+    await shutdown_handler._perform_cleanup()
 
 if __name__ == "__main__":
     import uvicorn

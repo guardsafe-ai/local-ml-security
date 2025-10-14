@@ -9,7 +9,6 @@ http://data-privacy:8005
 All endpoints require authentication headers:
 ```javascript
 headers: {
-  'Authorization': 'Bearer <token>',
   'Content-Type': 'application/json'
 }
 ```

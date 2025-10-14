@@ -1,104 +1,95 @@
 """
-Shared HTTP Client Manager
-Manages HTTP client connections with proper pooling and cleanup
+Resilient HTTP Client with Circuit Breaker Integration
+Provides robust HTTP communication between services with circuit breaker protection
 """
 
-import asyncio
-import logging
-from typing import Optional
 import httpx
+import logging
+from typing import Dict, Any, Optional
+from utils.circuit_breaker import get_external_api_breaker
+from middleware.tracing import inject_trace_context
 
 logger = logging.getLogger(__name__)
 
-
-class HTTPClientManager:
-    """Singleton HTTP client manager with connection pooling"""
-    
-    _instance: Optional['HTTPClientManager'] = None
-    _lock = asyncio.Lock()
-    
-    def __init__(self):
-        self.client: Optional[httpx.AsyncClient] = None
-        self._initialized = False
-    
-    @classmethod
-    async def get_instance(cls) -> 'HTTPClientManager':
-        """Get singleton instance with thread-safe initialization"""
-        if cls._instance is None:
-            async with cls._lock:
-                if cls._instance is None:
-                    cls._instance = cls()
-        return cls._instance
-    
-    async def initialize(self) -> None:
-        """Initialize HTTP client with connection pooling"""
-        if self._initialized:
-            return
-            
-        try:
-            self.client = httpx.AsyncClient(
-                timeout=httpx.Timeout(30.0),
-                limits=httpx.Limits(
-                    max_keepalive_connections=20,
-                    max_connections=100,
-                    keepalive_expiry=30.0
-                ),
-                http2=True,  # Enable HTTP/2 for better performance
-                follow_redirects=True
-            )
-            self._initialized = True
-            logger.info("✅ HTTP client manager initialized with connection pooling")
-        except Exception as e:
-            logger.error(f"❌ Failed to initialize HTTP client manager: {e}")
-            raise
-    
-    async def close(self) -> None:
-        """Close HTTP client and cleanup resources"""
-        if self.client:
-            try:
-                await self.client.aclose()
-                logger.info("🔒 HTTP client manager closed")
-            except Exception as e:
-                logger.error(f"❌ Error closing HTTP client manager: {e}")
-            finally:
-                self.client = None
-                self._initialized = False
-    
-    def get_client(self) -> httpx.AsyncClient:
-        """Get the HTTP client instance"""
-        if not self._initialized or not self.client:
-            raise RuntimeError("HTTP client manager not initialized. Call initialize() first.")
-        return self.client
-    
-    async def health_check(self) -> bool:
-        """Check if HTTP client is healthy"""
-        if not self.client:
-            return False
-        
-        try:
-            # Simple health check - try to make a request
-            response = await self.client.get("http://httpbin.org/status/200", timeout=5.0)
-            return response.status_code == 200
-        except Exception:
-            return False
-
-
-# Global instance for easy access
-_http_manager: Optional[HTTPClientManager] = None
-
+# Global HTTP client instance for backward compatibility
+_http_client = None
 
 async def get_http_client() -> httpx.AsyncClient:
-    """Get the shared HTTP client instance"""
-    global _http_manager
-    if _http_manager is None:
-        _http_manager = await HTTPClientManager.get_instance()
-        await _http_manager.initialize()
-    return _http_manager.get_client()
+    """Get or create the global HTTP client (backward compatibility)"""
+    global _http_client
+    if _http_client is None:
+        _http_client = httpx.AsyncClient(timeout=30.0)
+    return _http_client
 
+async def close_http_client():
+    """Close the global HTTP client (backward compatibility)"""
+    global _http_client
+    if _http_client:
+        await _http_client.aclose()
+        _http_client = None
 
-async def close_http_client() -> None:
-    """Close the shared HTTP client"""
-    global _http_manager
-    if _http_manager:
-        await _http_manager.close()
-        _http_manager = None
+class ResilientHTTPClient:
+    """HTTP client with circuit breaker integration"""
+    
+    def __init__(self, service_name: str, timeout: float = 30.0):
+        self.service_name = service_name
+        self.timeout = timeout
+        self.breaker = get_external_api_breaker(service_name)
+        self.client = httpx.AsyncClient(timeout=timeout)
+    
+    async def post(self, url: str, **kwargs) -> httpx.Response:
+        """POST request with circuit breaker and trace context"""
+        async def _call():
+            # Inject trace context into headers
+            headers = kwargs.get('headers', {})
+            inject_trace_context(headers)
+            kwargs['headers'] = headers
+            
+            response = await self.client.post(url, **kwargs)
+            response.raise_for_status()
+            return response
+        
+        return await self.breaker.call(_call)
+    
+    async def get(self, url: str, **kwargs) -> httpx.Response:
+        """GET request with circuit breaker and trace context"""
+        async def _call():
+            # Inject trace context into headers
+            headers = kwargs.get('headers', {})
+            inject_trace_context(headers)
+            kwargs['headers'] = headers
+            
+            response = await self.client.get(url, **kwargs)
+            response.raise_for_status()
+            return response
+        
+        return await self.breaker.call(_call)
+    
+    async def put(self, url: str, **kwargs) -> httpx.Response:
+        """PUT request with circuit breaker"""
+        async def _call():
+            response = await self.client.put(url, **kwargs)
+            response.raise_for_status()
+            return response
+        
+        return await self.breaker.call(_call)
+    
+    async def delete(self, url: str, **kwargs) -> httpx.Response:
+        """DELETE request with circuit breaker"""
+        async def _call():
+            response = await self.client.delete(url, **kwargs)
+            response.raise_for_status()
+            return response
+        
+        return await self.breaker.call(_call)
+    
+    async def close(self):
+        """Close the HTTP client"""
+        await self.client.aclose()
+
+# Service-specific HTTP clients
+business_metrics_client = ResilientHTTPClient("business_metrics", timeout=10.0)
+analytics_client = ResilientHTTPClient("analytics", timeout=15.0)
+training_client = ResilientHTTPClient("training", timeout=30.0)
+data_privacy_client = ResilientHTTPClient("data_privacy", timeout=10.0)
+model_cache_client = ResilientHTTPClient("model_cache", timeout=5.0)

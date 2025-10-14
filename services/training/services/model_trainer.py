@@ -12,7 +12,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional, Any, Tuple
 import warnings
-warnings.filterwarnings("ignore")
+# Targeted warning suppression - only suppress specific warnings that are expected
+warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
+warnings.filterwarnings("ignore", category=FutureWarning, module="torch")
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="sklearn")
+warnings.filterwarnings("ignore", category=ConvergenceWarning, module="sklearn")
+logger.debug("🔇 [WARNINGS] Applied targeted warning filters for ML training")
 
 # Disable MLflow integration in Transformers before importing
 os.environ["MLFLOW_DISABLE"] = "1"
@@ -79,6 +84,7 @@ def setup_device():
 DEVICE, DEVICE_TYPE = setup_device()
 GPU_AVAILABLE = (DEVICE_TYPE == "cuda")
 from sklearn.model_selection import train_test_split
+from utils.data_lineage import create_data_splits_with_lineage, DataLineageTracker
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support, confusion_matrix
 import datasets
 from datasets import Dataset as HFDataset
@@ -176,11 +182,30 @@ class ModelTrainer:
             texts = [item['text'] for item in data]
             labels = [item['label'] for item in data]
             
-            # Convert labels to integers if they're strings
+            # Convert labels to integers if they're strings - DYNAMIC MAPPING
             if isinstance(labels[0], str):
-                label_map = {"prompt_injection": 0, "jailbreak": 1, "system_extraction": 2, 
-                           "code_injection": 3, "benign": 4}
-                labels = [label_map.get(label, 4) for label in labels]
+                # Extract unique labels and create mapping dynamically
+                unique_labels = sorted(list(set(labels)))
+                label_map = {label: idx for idx, label in enumerate(unique_labels)}
+                
+                # Validate all labels are present and warn about any missing expected labels
+                expected_labels = {"prompt_injection", "jailbreak", "system_extraction", "code_injection", "benign"}
+                missing_labels = expected_labels - set(unique_labels)
+                if missing_labels:
+                    logger.warning(f"⚠️ [LABEL WARNING] Missing expected labels: {missing_labels}")
+                
+                # Convert labels with validation - FAIL if unknown label found
+                converted_labels = []
+                for label in labels:
+                    if label in label_map:
+                        converted_labels.append(label_map[label])
+                    else:
+                        raise ValueError(f"Unknown label '{label}' found in data. Expected: {list(label_map.keys())}")
+                labels = converted_labels
+                
+                # Store label mapping for later use
+                self.label_map = label_map
+                logger.info(f"✅ [LABEL MAPPING] Created dynamic mapping: {label_map}")
             
             # Extract file_id from S3 path
             file_id = data_path.split('/')[-1].split('.')[0]  # Get filename without extension
@@ -481,26 +506,36 @@ class ModelTrainer:
                 f"Model moved to {DEVICE_TYPE.upper()}: {DEVICE}"
             )
             
-            # Validate dataset size for train_test_split
+            # Create datasets with proper train/val/test split and data lineage tracking
             if len(texts) < 10:
                 logger.warning(f"⚠️ Dataset too small ({len(texts)} samples) for proper train/val/test split. Using all data for training.")
                 train_texts, val_texts, test_texts = texts, texts[:1], texts[:1]  # Use first sample as validation and test
                 train_labels, val_labels, test_labels = labels, labels[:1], labels[:1]
+                
+                # Create minimal lineage tracker for small datasets
+                from utils.data_lineage import DataLineageTracker
+                lineage_tracker = DataLineageTracker()
+                logger.warning("⚠️ [DATA LINEAGE] Skipping lineage tracking for small dataset")
             else:
-                # Create datasets with proper train/val/test split and stratification
-                # First split: 80% train+val, 20% test
-                train_val_texts, test_texts, train_val_labels, test_labels = train_test_split(
-                    texts, labels, test_size=0.2, random_state=42, stratify=labels
-                )
-                # Second split: 80% train, 20% val from the 80% train+val
-                train_texts, val_texts, train_labels, val_labels = train_test_split(
-                    train_val_texts, train_val_labels, test_size=0.25, random_state=42, stratify=train_val_labels
+                # Use data lineage tracking to prevent leakage
+                train_texts, val_texts, test_texts, train_labels, val_labels, test_labels, lineage_tracker = create_data_splits_with_lineage(
+                    texts=texts,
+                    labels=labels,
+                    data_source=training_data_path,
+                    test_size=0.2,
+                    val_size=0.25,
+                    random_state=42
                 )
                 
                 await TrainingLogsService.log_training_event(
                     job_id, "INFO", "data_splitter", 
-                    f"Data split: {len(train_texts)} train, {len(val_texts)} val, {len(test_texts)} test",
-                    {"train_size": len(train_texts), "val_size": len(val_texts), "test_size": len(test_texts)}
+                    f"Data split with lineage tracking: {len(train_texts)} train, {len(val_texts)} val, {len(test_texts)} test",
+                    {
+                        "train_size": len(train_texts), 
+                        "val_size": len(val_texts), 
+                        "test_size": len(test_texts),
+                        "lineage_summary": lineage_tracker.get_split_summary()
+                    }
                 )
             
             train_dataset = SecurityDataset(train_texts, train_labels, tokenizer, training_config.max_length)

@@ -4,6 +4,7 @@ Modularized model cache service with clean architecture
 """
 
 import asyncio
+import signal
 import time
 import logging
 from contextlib import asynccontextmanager
@@ -200,6 +201,35 @@ class CachedModel:
             raise
 
 
+class CacheManager:
+    """Intelligent cache management with TTL and event-based invalidation"""
+    
+    def __init__(self, redis_client: redis.Redis):
+        self.redis = redis_client
+        self.default_ttl = 3600  # 1 hour
+    
+    async def set_with_ttl(self, key: str, value: Any, ttl: int = None):
+        """Set cache value with TTL"""
+        ttl = ttl or self.default_ttl
+        await self.redis.setex(key, ttl, json.dumps(value))
+    
+    async def invalidate_pattern(self, pattern: str):
+        """Invalidate all keys matching pattern"""
+        keys = await self.redis.keys(pattern)
+        if keys:
+            await self.redis.delete(*keys)
+            logger.info(f"Invalidated {len(keys)} cache entries matching '{pattern}'")
+    
+    async def invalidate_model_cache(self, model_name: str):
+        """Invalidate all cache entries for a model"""
+        patterns = [
+            f"model:{model_name}:*",
+            f"prediction:{model_name}:*",
+            f"metadata:{model_name}:*"
+        ]
+        for pattern in patterns:
+            await self.invalidate_pattern(pattern)
+
 class ModelCache:
     """Model cache service for managing model predictions"""
     
@@ -207,6 +237,8 @@ class ModelCache:
         self.model_api_url = "http://model-api:8000"
         self.training_api_url = "http://training:8002"
         self.models = {}  # Cache for CachedModel instances
+        self.redis_client = redis.Redis(host='redis', port=6379, decode_responses=True)
+        self.cache_manager = CacheManager(self.redis_client)
         self.model_configs = {
             "bert-base": {
                 "path": "bert-base-uncased",
@@ -409,6 +441,10 @@ class ModelCache:
                         "action": "model_load_success",
                         "response_status": response.status_code
                     })
+                    
+                    # Invalidate cache for this model
+                    await self.cache_manager.invalidate_model_cache(model_name)
+                    
                     return True
                 else:
                     self._add_log("ERROR", f"Failed to load model {model_name}: {response.status_code}", model_name, {
@@ -842,9 +878,13 @@ model_cache_size 0
 async def clear_cache():
     """Clear model cache"""
     try:
+        # Clear in-memory models
         model_cache.models.clear()
         model_cache.stats["cache_hits"] = 0
         model_cache.stats["cache_misses"] = 0
+        
+        # Clear Redis cache
+        await model_cache.cache_manager.invalidate_pattern("*")
         
         return SuccessResponse(
             status="success",
@@ -884,6 +924,91 @@ async def unload_model(model_name: str):
         logger.error(f"Failed to unload model {model_name}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
+# Graceful shutdown handler
+class GracefulShutdown:
+    """Handles graceful shutdown of the model-cache service"""
+    
+    def __init__(self, app):
+        self.app = app
+        self.is_shutting_down = False
+        self.shutdown_timeout = 30  # seconds
+        self.pending_tasks = set()
+        logger.info("GracefulShutdown handler initialized for model-cache service.")
+    
+    def register_handlers(self):
+        """Register signal handlers for graceful shutdown."""
+        if hasattr(signal, 'SIGTERM'):
+            signal.signal(signal.SIGTERM, self.shutdown_handler)
+        if hasattr(signal, 'SIGINT'):
+            signal.signal(signal.SIGINT, self.shutdown_handler)
+        logger.info("Registered SIGTERM and SIGINT handlers for model-cache service.")
+        
+        @self.app.on_event("shutdown")
+        async def _on_shutdown():
+            await self._perform_cleanup()
+    
+    async def shutdown_handler(self, signum, frame):
+        """Handle shutdown signals."""
+        if self.is_shutting_down:
+            logger.warning("Model-cache service already in shutdown process, ignoring signal.")
+            return
+        
+        self.is_shutting_down = True
+        logger.info(f"Model-cache service received signal {signum}, initiating graceful shutdown...")
+        
+        # Trigger FastAPI's shutdown event
+        await self.app.shutdown()
+    
+    async def _perform_cleanup(self):
+        """Perform actual cleanup tasks."""
+        logger.info("Performing graceful shutdown cleanup for model-cache service...")
+        
+        # Cancel any pending background tasks
+        if self.pending_tasks:
+            logger.info(f"Cancelling {len(self.pending_tasks)} pending background tasks...")
+            for task in list(self.pending_tasks):
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    logger.debug(f"Task {task.get_name()} cancelled.")
+                except Exception as e:
+                    logger.error(f"Error during task cancellation: {e}")
+            self.pending_tasks.clear()
+            logger.info("All pending tasks cancelled.")
+        
+        # Clear model cache
+        try:
+            if hasattr(model_cache, 'models'):
+                for model_name in list(model_cache.models.keys()):
+                    try:
+                        del model_cache.models[model_name]
+                        logger.info(f"Unloaded model {model_name} during shutdown")
+                    except Exception as e:
+                        logger.error(f"Error unloading model {model_name}: {e}")
+                logger.info("Model cache cleared.")
+        except Exception as e:
+            logger.error(f"Error clearing model cache: {e}")
+        
+        # Close Redis connections
+        try:
+            if hasattr(model_cache, 'redis_client') and model_cache.redis_client:
+                await model_cache.redis_client.close()
+                logger.info("Redis client closed.")
+        except Exception as e:
+            logger.error(f"Error closing Redis connections: {e}")
+        
+        logger.info("Model-cache service graceful shutdown cleanup complete.")
+
+# Initialize graceful shutdown
+shutdown_handler = GracefulShutdown(app)
+shutdown_handler.register_handlers()
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Cleanup on shutdown"""
+    await shutdown_handler._perform_cleanup()
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8003)

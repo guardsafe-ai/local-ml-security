@@ -19,14 +19,6 @@ The Training Service is the **complete ML model training pipeline and lifecycle 
 http://training:8002
 ```
 
-### Authentication
-All endpoints require authentication headers:
-```javascript
-headers: {
-  'Authorization': 'Bearer <token>',
-  'Content-Type': 'application/json'
-}
-```
 
 ### Core Training Endpoints
 

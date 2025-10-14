@@ -626,7 +626,6 @@ const queryClient = new QueryClient({
 - **CSRF Protection**: CSRF token validation
 
 ### 2. Authentication & Authorization
-- **JWT Tokens**: Secure authentication
 - **Role-based Access**: Granular permission system
 - **Session Management**: Secure session handling
 - **Token Refresh**: Automatic token renewal

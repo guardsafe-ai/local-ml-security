@@ -5,7 +5,7 @@ Service configuration management with development defaults
 
 import os
 from typing import Dict, Any
-from .config_validation import validate_production_config
+from .config_validation import validate_config
 
 
 def get_config() -> Dict[str, Any]:
@@ -30,6 +30,6 @@ def get_config() -> Dict[str, Any]:
     
     # Only validate in production environment
     if os.getenv("ENVIRONMENT") == "production":
-        validate_production_config(config, "training")
+        validate_config(config, "training")
     
     return config

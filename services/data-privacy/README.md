@@ -19,14 +19,6 @@ The Data Privacy Service is the **compliance and data protection engine** of the
 http://data-privacy:8005
 ```
 
-### Authentication
-All endpoints require authentication headers:
-```javascript
-headers: {
-  'Authorization': 'Bearer <token>',
-  'Content-Type': 'application/json'
-}
-```
 
 ### Core Privacy Endpoints
 

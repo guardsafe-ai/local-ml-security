@@ -7,6 +7,7 @@ import logging
 import os
 import asyncio
 from typing import Optional
+from contextlib import asynccontextmanager
 import asyncpg
 from asyncpg import Pool
 
@@ -36,9 +37,16 @@ class DatabaseManager:
                 database=self.connection_params["database"],
                 user=self.connection_params["user"],
                 password=self.connection_params["password"],
-                min_size=1,
-                max_size=10,
-                command_timeout=60
+                min_size=5,
+                max_size=20,
+                max_queries=50000,  # Recycle connections after 50k queries
+                max_inactive_connection_lifetime=300,  # 5 min idle timeout
+                timeout=30,  # 30s connection acquire timeout
+                command_timeout=60,  # 60s query timeout
+                server_settings={
+                    'jit': 'off',
+                    'statement_timeout': '60000'  # 60s statement timeout
+                }
             )
             logger.info("Database connection pool created successfully")
             return True

@@ -164,10 +164,7 @@ class PredictionLogger:
             for log in batch:
                 try:
                     # Encrypt sensitive input text
-                    encrypted_input = self.encryption.encrypt_data(
-                        log.input_text, 
-                        data_type="prediction_input"
-                    )
+                    encrypted_input = self.encryption.encrypt_data(log.input_text)
                     
                     # Encrypt metadata if it contains sensitive information
                     encrypted_metadata = None
@@ -177,10 +174,7 @@ class PredictionLogger:
                         has_sensitive = any(key in log.metadata for key in sensitive_keys)
                         
                         if has_sensitive:
-                            encrypted_metadata = self.encryption.encrypt_data(
-                                log.metadata,
-                                data_type="prediction_metadata"
-                            )
+                            encrypted_metadata = self.encryption.encrypt_data(str(log.metadata))
                         else:
                             encrypted_metadata = {"encrypted_data": json.dumps(log.metadata), "encrypted": False}
                     

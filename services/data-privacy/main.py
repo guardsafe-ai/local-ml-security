@@ -6,6 +6,7 @@ Enterprise-grade data privacy, anonymization, and compliance management
 
 import asyncio
 import logging
+import signal
 import hashlib
 import re
 import json
@@ -578,6 +579,78 @@ async def prometheus_metrics():
     """Prometheus metrics endpoint"""
     from fastapi import Response
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+# Graceful shutdown handler
+class GracefulShutdown:
+    """Handles graceful shutdown of the data-privacy service"""
+    
+    def __init__(self, app):
+        self.app = app
+        self.is_shutting_down = False
+        self.shutdown_timeout = 30  # seconds
+        self.pending_tasks = set()
+        logger.info("GracefulShutdown handler initialized for data-privacy service.")
+    
+    def register_handlers(self):
+        """Register signal handlers for graceful shutdown."""
+        if hasattr(signal, 'SIGTERM'):
+            signal.signal(signal.SIGTERM, self.shutdown_handler)
+        if hasattr(signal, 'SIGINT'):
+            signal.signal(signal.SIGINT, self.shutdown_handler)
+        logger.info("Registered SIGTERM and SIGINT handlers for data-privacy service.")
+        
+        @self.app.on_event("shutdown")
+        async def _on_shutdown():
+            await self._perform_cleanup()
+    
+    async def shutdown_handler(self, signum, frame):
+        """Handle shutdown signals."""
+        if self.is_shutting_down:
+            logger.warning("Data-privacy service already in shutdown process, ignoring signal.")
+            return
+        
+        self.is_shutting_down = True
+        logger.info(f"Data-privacy service received signal {signum}, initiating graceful shutdown...")
+        
+        # Trigger FastAPI's shutdown event
+        await self.app.shutdown()
+    
+    async def _perform_cleanup(self):
+        """Perform actual cleanup tasks."""
+        logger.info("Performing graceful shutdown cleanup for data-privacy service...")
+        
+        # Cancel any pending background tasks
+        if self.pending_tasks:
+            logger.info(f"Cancelling {len(self.pending_tasks)} pending background tasks...")
+            for task in list(self.pending_tasks):
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    logger.debug(f"Task {task.get_name()} cancelled.")
+                except Exception as e:
+                    logger.error(f"Error during task cancellation: {e}")
+            self.pending_tasks.clear()
+            logger.info("All pending tasks cancelled.")
+        
+        # Close database connections
+        try:
+            if hasattr(privacy_service, 'conn_pool') and privacy_service.conn_pool:
+                await privacy_service.conn_pool.close()
+                logger.info("Database connection pool closed.")
+        except Exception as e:
+            logger.error(f"Error closing database connections: {e}")
+        
+        logger.info("Data-privacy service graceful shutdown cleanup complete.")
+
+# Initialize graceful shutdown
+shutdown_handler = GracefulShutdown(app)
+shutdown_handler.register_handlers()
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Cleanup on shutdown"""
+    await shutdown_handler._perform_cleanup()
 
 if __name__ == "__main__":
     import uvicorn

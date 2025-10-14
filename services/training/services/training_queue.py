@@ -13,6 +13,7 @@ from enum import Enum
 from typing import Dict, List, Optional, Any, Callable
 from dataclasses import dataclass, asdict
 import redis.asyncio as redis
+from utils.training_cleanup import cleanup_training_resources, register_training_job, add_cleanup_callback
 
 logger = logging.getLogger(__name__)
 
@@ -362,10 +363,20 @@ class TrainingQueue:
                 config=training_config
             )
             
+            # Register job for resource tracking
+            register_training_job(job.job_id, {
+                "model_name": job.model_name,
+                "worker_name": worker_name,
+                "timeout_seconds": job.timeout_seconds
+            })
+            
             # Start training with timeout
             training_task = asyncio.create_task(
                 trainer.train_model(training_request)
             )
+            
+            # Add cleanup callback for the training task
+            add_cleanup_callback(job.job_id, training_task.cancel)
             
             # Wait for completion or timeout
             try:
@@ -374,19 +385,22 @@ class TrainingQueue:
                     timeout=job.timeout_seconds
                 )
                 
-                # Job completed successfully
+                # Job completed successfully - cleanup resources
+                await cleanup_training_resources(job.job_id, "success")
                 await self._complete_job(job.job_id, result)
                 logger.info(f"✅ [{worker_name}] Completed job: {job.job_id}")
                 
             except asyncio.TimeoutError:
-                # Job timed out
-                await self._fail_job(job.job_id, "Job timed out")
+                # Job timed out - cleanup resources
                 logger.warning(f"⏰ [{worker_name}] Job timed out: {job.job_id}")
+                await cleanup_training_resources(job.job_id, "timeout")
+                await self._fail_job(job.job_id, "Job timed out")
                 
             except Exception as e:
-                # Job failed
-                await self._fail_job(job.job_id, str(e))
+                # Job failed - cleanup resources
                 logger.error(f"❌ [{worker_name}] Job failed: {job.job_id} - {e}")
+                await cleanup_training_resources(job.job_id, "failure")
+                await self._fail_job(job.job_id, str(e))
             
         except Exception as e:
             logger.error(f"❌ [{worker_name}] Error processing job {job.job_id}: {e}")

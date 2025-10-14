@@ -9,7 +9,6 @@ http://business-metrics:8004
 All endpoints require authentication headers:
 ```javascript
 headers: {
-  'Authorization': 'Bearer <token>',
   'Content-Type': 'application/json'
 }
 ```

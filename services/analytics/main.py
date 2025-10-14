@@ -5,6 +5,7 @@ Stores and analyzes red team test results and model performance metrics
 
 import logging
 import asyncio
+import signal
 from datetime import datetime
 from fastapi import FastAPI, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,7 +25,9 @@ from services.auto_retrain import auto_retrain_service
 from utils import setup_logging, get_config
 from database.connection import db_manager
 from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
+from utils.enhanced_logging import get_analytics_logger, log_analytics_error, log_analytics_event
 from utils.http_client import get_http_client, close_http_client
+from background_tasks import start_drift_monitoring, stop_drift_monitoring
 
 # Import tracing setup
 import sys
@@ -57,10 +60,8 @@ DRIFT_SCORE = Gauge('drift_score', 'Current drift score', ['model_name', 'drift_
 AUTO_RETRAIN_COUNT = Counter('auto_retrains_total', 'Total number of auto-retrain triggers', ['model_name', 'reason'])
 
 # ML Operation Metrics
-DRIFT_DETECTION_FAILURES = Counter('drift_detection_failures_total', 'Drift detection errors', ['detection_type', 'error_type'])
 MODEL_PROMOTION_DECISIONS = Counter('model_promotion_decisions_total', 'Model promotion decisions', ['model_name', 'decision', 'reason'])
 TRAINING_DATA_PIPELINE_ERRORS = Counter('training_data_pipeline_errors_total', 'Data pipeline errors', ['pipeline_stage', 'error_type'])
-ML_OPERATION_DURATION = Histogram('ml_operation_duration_seconds', 'ML operation duration', ['operation_type', 'model_name'], buckets=[0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0])
 
 # Add CORS middleware
 app.add_middleware(
@@ -130,23 +131,108 @@ async def startup_event():
     except Exception as e:
         logger.error(f"Failed to start auto-retrain monitoring: {e}")
 
+# Graceful shutdown handler
+class GracefulShutdown:
+    """Handles graceful shutdown of the analytics service"""
+    
+    def __init__(self, app):
+        self.app = app
+        self.is_shutting_down = False
+        self.shutdown_timeout = 30  # seconds
+        self.pending_tasks = set()
+        logger.info("GracefulShutdown handler initialized for analytics service.")
+    
+    def register_handlers(self):
+        """Register signal handlers for graceful shutdown."""
+        if hasattr(signal, 'SIGTERM'):
+            signal.signal(signal.SIGTERM, self.shutdown_handler)
+        if hasattr(signal, 'SIGINT'):
+            signal.signal(signal.SIGINT, self.shutdown_handler)
+        logger.info("Registered SIGTERM and SIGINT handlers for analytics service.")
+        
+        @self.app.on_event("shutdown")
+        async def _on_shutdown():
+            await self._perform_cleanup()
+    
+    async def shutdown_handler(self, signum, frame):
+        """Handle shutdown signals."""
+        if self.is_shutting_down:
+            logger.warning("Analytics service already in shutdown process, ignoring signal.")
+            return
+        
+        self.is_shutting_down = True
+        logger.info(f"Analytics service received signal {signum}, initiating graceful shutdown...")
+        
+        # Trigger FastAPI's shutdown event
+        await self.app.shutdown()
+    
+    async def _perform_cleanup(self):
+        """Perform actual cleanup tasks."""
+        logger.info("Performing graceful shutdown cleanup for analytics service...")
+        
+        # Cancel any pending background tasks
+        if self.pending_tasks:
+            logger.info(f"Cancelling {len(self.pending_tasks)} pending background tasks...")
+            for task in list(self.pending_tasks):
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    logger.debug(f"Task {task.get_name()} cancelled.")
+                except Exception as e:
+                    logger.error(f"Error during task cancellation: {e}")
+            self.pending_tasks.clear()
+            logger.info("All pending tasks cancelled.")
+        
+        # Close HTTP clients
+        try:
+            await close_http_client()
+            logger.info("HTTP client closed.")
+        except Exception as e:
+            logger.error(f"Error closing HTTP clients: {e}")
+        
+        # Stop drift monitoring
+        try:
+            await stop_drift_monitoring()
+            logger.info("Drift monitoring stopped.")
+        except Exception as e:
+            logger.error(f"Error stopping drift monitoring: {e}")
+        
+        # Close database connections
+        try:
+            await db_manager.disconnect()
+            logger.info("Database connection pool closed.")
+        except Exception as e:
+            logger.error(f"Error closing database connections: {e}")
+        
+        logger.info("Analytics service graceful shutdown cleanup complete.")
+
+# Initialize graceful shutdown
+shutdown_handler = GracefulShutdown(app)
+shutdown_handler.register_handlers()
+
+# Startup event
+@app.on_event("startup")
+async def startup_event():
+    """Initialize service on startup"""
+    logger.info("Starting Analytics Service...")
+    
+    # Start drift monitoring
+    try:
+        from services.drift_detection import drift_detector
+        from services.email_notifications import email_service
+        await start_drift_monitoring(drift_detector, email_service, db_manager)
+        logger.info("✅ Drift monitoring started")
+    except Exception as e:
+        logger.error(f"❌ Failed to start drift monitoring: {e}")
+    
+    logger.info("Analytics Service ready")
+
 # Shutdown event
 @app.on_event("shutdown")
 async def shutdown_event():
     """Clean up resources on shutdown"""
-    logger.info("Shutting down Analytics Service...")
-    
-    try:
-        await db_manager.disconnect()
-        logger.info("✅ Analytics database disconnected")
-    except Exception as e:
-        logger.error(f"Error during database disconnect: {e}")
-    
-    try:
-        await close_http_client()
-        logger.info("✅ HTTP client closed")
-    except Exception as e:
-        logger.error(f"Error during HTTP client cleanup: {e}")
+    await shutdown_handler._perform_cleanup()
 
 if __name__ == "__main__":
     uvicorn.run(

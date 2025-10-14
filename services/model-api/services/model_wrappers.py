@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 class PyTorchModel:
-    """Wrapper for PyTorch models with ONNX optimization"""
+    """Wrapper for PyTorch models with ONNX optimization and context manager support"""
     
     def __init__(self, model_path: str, model_name: str):
         self.model_path = model_path
@@ -35,6 +35,7 @@ class PyTorchModel:
         # Memory management
         self.temp_dirs = []  # Track temporary directories for cleanup
         self._cuda_initialized = torch.cuda.is_available()
+        self._context_managed = False  # Track if used as context manager
     
     def load(self, enable_onnx: bool = True):
         """Load the model and tokenizer with optional ONNX optimization"""
@@ -259,10 +260,27 @@ class PyTorchModel:
         except Exception as e:
             logger.error(f"❌ [CLEANUP] Error during memory cleanup: {e}")
     
-    def __del__(self):
-        """Destructor to ensure cleanup"""
+    def __enter__(self):
+        """Context manager entry - ensures proper cleanup"""
+        self._context_managed = True
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit - guaranteed cleanup"""
         try:
+            logger.info(f"🧹 [CONTEXT] Cleaning up {self.model_name} via context manager")
             self.cleanup_memory()
+            return False  # Don't suppress exceptions
+        except Exception as e:
+            logger.error(f"❌ [CONTEXT] Error during context manager cleanup: {e}")
+            return False  # Don't suppress exceptions
+    
+    def __del__(self):
+        """Destructor to ensure cleanup (fallback for non-context usage)"""
+        try:
+            if not self._context_managed:
+                logger.warning(f"⚠️ [DESTRUCTOR] {self.model_name} not used as context manager - cleanup may be unreliable")
+                self.cleanup_memory()
         except Exception as e:
             logger.debug(f"Error in destructor: {e}")
     
@@ -297,7 +315,7 @@ class PyTorchModel:
 
 
 class SklearnModel:
-    """Wrapper for Scikit-learn models"""
+    """Wrapper for Scikit-learn models with context manager support"""
     
     def __init__(self, model_path: str, model_name: str):
         self.model_path = model_path
@@ -308,6 +326,7 @@ class SklearnModel:
         self.loaded = False
         self.model_source = "Unknown"
         self.model_version = "Unknown"
+        self._context_managed = False  # Track if used as context manager
     
     def load(self):
         """Load the model and vectorizer"""
@@ -408,10 +427,27 @@ class SklearnModel:
         except Exception as e:
             logger.error(f"❌ [CLEANUP] Error during sklearn memory cleanup: {e}")
     
-    def __del__(self):
-        """Destructor to ensure cleanup"""
+    def __enter__(self):
+        """Context manager entry - ensures proper cleanup"""
+        self._context_managed = True
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit - guaranteed cleanup"""
         try:
+            logger.info(f"🧹 [CONTEXT] Cleaning up sklearn model {self.model_name} via context manager")
             self.cleanup_memory()
+            return False  # Don't suppress exceptions
+        except Exception as e:
+            logger.error(f"❌ [CONTEXT] Error during sklearn context manager cleanup: {e}")
+            return False  # Don't suppress exceptions
+    
+    def __del__(self):
+        """Destructor to ensure cleanup (fallback for non-context usage)"""
+        try:
+            if not self._context_managed:
+                logger.warning(f"⚠️ [DESTRUCTOR] Sklearn model {self.model_name} not used as context manager - cleanup may be unreliable")
+                self.cleanup_memory()
         except Exception as e:
             logger.debug(f"Error in sklearn destructor: {e}")
     

@@ -9,7 +9,6 @@ http://model-cache:8003
 All endpoints require authentication headers:
 ```javascript
 headers: {
-  'Authorization': 'Bearer <token>',
   'Content-Type': 'application/json'
 }
 ```

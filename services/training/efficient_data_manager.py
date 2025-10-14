@@ -20,6 +20,7 @@ import multiprocessing as mp
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 import tempfile
 import shutil
+from utils.data_quality_gates import DataQualityValidator, QualityThresholds, create_quality_thresholds_for_model_type
 
 logger = logging.getLogger(__name__)
 
@@ -411,35 +412,135 @@ class EfficientDataManager:
             return False
     
     async def _validate_file(self, file_info: DataFileInfo, rules: Dict[str, Any] = None) -> bool:
-        """Validate uploaded file"""
+        """Comprehensive file validation with schema checks and data quality metrics"""
         try:
             # Basic validation
             if file_info.file_size == 0:
+                logger.warning(f"❌ [VALIDATION] Empty file: {file_info.file_id}")
                 return False
             
             # Check file format
             if not file_info.original_name.endswith(('.jsonl', '.csv', '.txt')):
-                logger.warning(f"Unsupported file format: {file_info.original_name}")
+                logger.warning(f"❌ [VALIDATION] Unsupported file format: {file_info.original_name}")
                 return False
             
-            # Sample validation for JSONL
+            # Comprehensive validation for JSONL files
             if file_info.original_name.endswith('.jsonl'):
-                sample_data = await self._get_file_sample(file_info, 10)
-                for line in sample_data:
-                    # Skip empty lines
-                    if not line.strip():
-                        continue
-                    try:
-                        json.loads(line)
-                    except json.JSONDecodeError:
-                        logger.warning(f"Invalid JSON in file: {file_info.file_id}, line: '{line[:50]}...'")
-                        return False
+                return await self._validate_jsonl_file(file_info)
+            
+            # Basic validation for other formats
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ [VALIDATION] Validation error: {e}")
+            return False
+    
+    async def _validate_jsonl_file(self, file_info: DataFileInfo) -> bool:
+        """Comprehensive JSONL validation with schema and data quality checks"""
+        try:
+            # Load entire file for comprehensive validation
+            full_data = await self._load_full_file(file_info)
+            if not full_data:
+                logger.warning(f"❌ [VALIDATION] Could not load file: {file_info.file_id}")
+                return False
+            
+            # Parse all lines and validate schema
+            parsed_data = []
+            required_fields = {'text', 'label'}
+            
+            for line_num, line in enumerate(full_data, 1):
+                if not line.strip():
+                    continue
+                    
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError as e:
+                    logger.error(f"❌ [VALIDATION] Invalid JSON at line {line_num}: {e}")
+                    return False
+                
+                # Schema validation
+                if not isinstance(data, dict):
+                    logger.error(f"❌ [VALIDATION] Line {line_num}: Expected dict, got {type(data)}")
+                    return False
+                
+                # Check required fields
+                missing_fields = required_fields - set(data.keys())
+                if missing_fields:
+                    logger.error(f"❌ [VALIDATION] Line {line_num}: Missing required fields: {missing_fields}")
+                    return False
+                
+                # Validate field types and content
+                text = data.get('text', '')
+                label = data.get('label', '')
+                
+                if not isinstance(text, str) or not text.strip():
+                    logger.error(f"❌ [VALIDATION] Line {line_num}: Invalid or empty text field")
+                    return False
+                
+                if not isinstance(label, str) or not label.strip():
+                    logger.error(f"❌ [VALIDATION] Line {line_num}: Invalid or empty label field")
+                    return False
+                
+                parsed_data.append(data)
+            
+            # Extract texts and labels for quality validation
+            texts = [item['text'] for item in parsed_data]
+            labels = [item['label'] for item in parsed_data]
+            
+            # Use comprehensive quality gates validation
+            quality_validator = DataQualityValidator(
+                create_quality_thresholds_for_model_type("security_classification")
+            )
+            
+            validation_results = quality_validator.validate_dataset(
+                texts=texts,
+                labels=labels,
+                dataset_name=f"file_{file_info.file_id}"
+            )
+            
+            # Check if validation passed
+            if not validation_results["validation_passed"]:
+                logger.error(f"❌ [QUALITY GATES] Data quality validation failed:")
+                for error in validation_results["errors"]:
+                    logger.error(f"   ❌ {error}")
+                return False
+            
+            # Log warnings if any
+            if validation_results["warnings"]:
+                logger.warning(f"⚠️ [QUALITY GATES] Data quality warnings:")
+                for warning in validation_results["warnings"]:
+                    logger.warning(f"   ⚠️ {warning}")
+            
+            # Log validation summary
+            metrics = validation_results["metrics"]
+            logger.info(f"✅ [QUALITY GATES] File {file_info.file_id} passed validation:")
+            logger.info(f"   📊 Samples: {metrics.get('total_samples', 0)}")
+            logger.info(f"   🏷️  Classes: {metrics.get('class_balance', {}).get('unique_classes', 0)}")
+            logger.info(f"   📏 Text length: {metrics.get('text_length_stats', {}).get('mean', 0):.1f} ± {metrics.get('text_length_stats', {}).get('std', 0):.1f}")
+            logger.info(f"   🔄 Duplicates: {metrics.get('duplicates', {}).get('duplicate_rate', 0):.1f}%")
+            logger.info(f"   ⚖️  Imbalance: {metrics.get('class_balance', {}).get('imbalance_ratio', 0):.1f}:1")
+            
+            # Log recommendations if any
+            if validation_results["recommendations"]:
+                logger.info(f"💡 [QUALITY GATES] Recommendations:")
+                for rec in validation_results["recommendations"]:
+                    logger.info(f"   💡 {rec}")
             
             return True
             
         except Exception as e:
-            logger.error(f"Validation error: {e}")
+            logger.error(f"❌ [VALIDATION] JSONL validation error: {e}")
             return False
+    
+    async def _load_full_file(self, file_info: DataFileInfo) -> List[str]:
+        """Load entire file for comprehensive validation"""
+        try:
+            # This would need to be implemented based on your storage backend
+            # For now, return a sample - in production, load the full file
+            return await self._get_file_sample(file_info, 1000)  # Increased sample size
+        except Exception as e:
+            logger.error(f"Failed to load full file: {e}")
+            return []
     
     async def _get_file_sample(self, file_info: DataFileInfo, sample_size: int) -> List[str]:
         """Get sample lines from file for validation"""

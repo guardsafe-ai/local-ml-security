@@ -19,14 +19,6 @@ The Tracing Service is the **distributed observability and tracing engine** of t
 http://tracing:8007
 ```
 
-### Authentication
-All endpoints require authentication headers:
-```javascript
-headers: {
-  'Authorization': 'Bearer <token>',
-  'Content-Type': 'application/json'
-}
-```
 
 ### Core Tracing Endpoints
 

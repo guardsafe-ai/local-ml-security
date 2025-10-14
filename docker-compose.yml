@@ -67,28 +67,28 @@ services:
       - ml-network
 
   # Red Team Service
-  red-team:
-    build:
-      context: ./services/red-team
-      dockerfile: Dockerfile
-    ports:
-      - "8001:8001"
-    environment:
-      - REDIS_URL=redis://redis:6379
-      - MLFLOW_TRACKING_URI=http://mlflow:5000
-      - POSTGRES_URL=postgresql://mlflow:password@postgres:5432/ml_security_consolidated
-      - JAEGER_AGENT_HOST=jaeger
-      - JAEGER_AGENT_PORT=14268
-    depends_on:
-      - redis
-      - mlflow
-      - postgres
-      - jaeger
-    volumes:
-      - ./data/red_team:/app/data
-      - ./services/red-team:/app
-    networks:
-      - ml-network
+  # red-team:
+  #   build:
+  #     context: ./services/red-team
+  #     dockerfile: Dockerfile
+  #   ports:
+  #     - "8001:8001"
+  #   environment:
+  #     - REDIS_URL=redis://redis:6379
+  #     - MLFLOW_TRACKING_URI=http://mlflow:5000
+  #     - POSTGRES_URL=postgresql://mlflow:password@postgres:5432/ml_security_consolidated
+  #     - JAEGER_AGENT_HOST=jaeger
+  #     - JAEGER_AGENT_PORT=14268
+  #   depends_on:
+  #     - redis
+  #     - mlflow
+  #     - postgres
+  #     - jaeger
+  #   volumes:
+  #     - ./data/red_team:/app/data
+  #     - ./services/red-team:/app
+  #   networks:
+  #     - ml-network
 
   # Model Training Service
   training:
@@ -345,7 +345,7 @@ services:
       - postgres
       - training
       - model-api
-      - red-team
+      # - red-team
       - analytics
       - mlflow
       - minio

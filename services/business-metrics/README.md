@@ -19,14 +19,6 @@ The Business Metrics Service is the **enterprise-grade metrics collection and bu
 http://business-metrics:8004
 ```
 
-### Authentication
-All endpoints require authentication headers:
-```javascript
-headers: {
-  'Authorization': 'Bearer <token>',
-  'Content-Type': 'application/json'
-}
-```
 
 ### Core Metrics Endpoints
 

@@ -19,14 +19,6 @@ The Model Cache Service is the **high-performance inference engine** of the ML S
 http://model-cache:8003
 ```
 
-### Authentication
-All endpoints require authentication headers:
-```javascript
-headers: {
-  'Authorization': 'Bearer <token>',
-  'Content-Type': 'application/json'
-}
-```
 
 ### Core Inference Endpoints
 

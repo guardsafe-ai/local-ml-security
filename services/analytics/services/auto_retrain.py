@@ -206,14 +206,14 @@ class AutoRetrainService:
                 f"{self.analytics_service_url}/drift/recent-results",
                 params={"model_name": model_name, "hours": 24}
             )
-                
-                if response.status_code == 200:
-                    self.circuit_breakers["analytics"].record_success()
-                    return response.json()
-                else:
-                    self.circuit_breakers["analytics"].record_failure()
-                    logger.warning(f"⚠️ [AUTO-RETRAIN] Failed to get drift results: {response.status_code}")
-                    return None
+            
+            if response.status_code == 200:
+                self.circuit_breakers["analytics"].record_success()
+                return response.json()
+            else:
+                self.circuit_breakers["analytics"].record_failure()
+                logger.warning(f"⚠️ [AUTO-RETRAIN] Failed to get drift results: {response.status_code}")
+                return None
                     
         except Exception as e:
             self.circuit_breakers["analytics"].record_failure()
@@ -315,36 +315,36 @@ class AutoRetrainService:
                     "priority": self.config.retrain_priority,
                     "auto_retrain": True,
                     "trigger_reason": trigger.value
-                }
+            }
+            
+            response = await client.post(
+                f"{self.training_service_url}/train",
+                json=retrain_request
+            )
+            
+            if response.status_code == 200:
+                self.circuit_breakers["training"].record_success()
+                result = response.json()
+                retrain_event.retrain_job_id = result.get("job_id")
+                retrain_event.status = "in_progress"
                 
-                response = await client.post(
-                    f"{self.training_service_url}/train",
-                    json=retrain_request
-                )
+                # Update tracking
+                self.retrain_events[event_id] = retrain_event
+                self.last_retrain_times[model_name] = datetime.now()
                 
-                if response.status_code == 200:
-                    self.circuit_breakers["training"].record_success()
-                    result = response.json()
-                    retrain_event.retrain_job_id = result.get("job_id")
-                    retrain_event.status = "in_progress"
-                    
-                    # Update tracking
-                    self.retrain_events[event_id] = retrain_event
-                    self.last_retrain_times[model_name] = datetime.now()
-                    
-                    # Update daily count
-                    today = datetime.now().date()
-                    daily_key = f"{model_name}_{today}"
-                    self.daily_retrain_counts[daily_key] = self.daily_retrain_counts.get(daily_key, 0) + 1
-                    
-                    logger.info(f"✅ [AUTO-RETRAIN] Retrain job submitted: {retrain_event.retrain_job_id}")
-                    return retrain_event
-                else:
-                    self.circuit_breakers["training"].record_failure()
-                    logger.error(f"❌ [AUTO-RETRAIN] Failed to submit retrain job: {response.status_code}")
-                    retrain_event.status = "failed"
-                    retrain_event.error_message = f"HTTP {response.status_code}: {response.text}"
-                    return retrain_event
+                # Update daily count
+                today = datetime.now().date()
+                daily_key = f"{model_name}_{today}"
+                self.daily_retrain_counts[daily_key] = self.daily_retrain_counts.get(daily_key, 0) + 1
+                
+                logger.info(f"✅ [AUTO-RETRAIN] Retrain job submitted: {retrain_event.retrain_job_id}")
+                return retrain_event
+            else:
+                self.circuit_breakers["training"].record_failure()
+                logger.error(f"❌ [AUTO-RETRAIN] Failed to submit retrain job: {response.status_code}")
+                retrain_event.status = "failed"
+                retrain_event.error_message = f"HTTP {response.status_code}: {response.text}"
+                return retrain_event
                     
         except Exception as e:
             self.circuit_breakers["training"].record_failure()
@@ -370,30 +370,30 @@ class AutoRetrainService:
             client = await get_http_client()
             # First try to get production inference data for retraining
             response = await client.get(f"{self.analytics_service_url}/data/production-inference")
-                
-                if response.status_code == 200:
-                    self.circuit_breakers["training"].record_success()
-                    data_info = response.json()
-                    if data_info and data_info.get("s3_path"):
-                        logger.info(f"✅ [AUTO-RETRAIN] Using production inference data: {data_info['s3_path']}")
-                        return data_info["s3_path"]
-                
-                # Fallback to fresh training data if production data not available
-                logger.info("ℹ️ [AUTO-RETRAIN] Production inference data not available, trying fresh training data")
-                response = await client.get(f"{self.training_service_url}/data/fresh-data")
-                
-                if response.status_code == 200:
-                    self.circuit_breakers["training"].record_success()
-                    data_info = response.json()
-                    if data_info and len(data_info) > 0:
-                        # Get the most recent data file
-                        latest_data = max(data_info, key=lambda x: x.get("timestamp", ""))
-                        logger.info(f"✅ [AUTO-RETRAIN] Using fresh training data: {latest_data.get('s3_path')}")
-                        return latest_data.get("s3_path")
-                
-                self.circuit_breakers["training"].record_failure()
-                logger.warning("⚠️ [AUTO-RETRAIN] No training data available")
-                return None
+            
+            if response.status_code == 200:
+                self.circuit_breakers["training"].record_success()
+                data_info = response.json()
+                if data_info and data_info.get("s3_path"):
+                    logger.info(f"✅ [AUTO-RETRAIN] Using production inference data: {data_info['s3_path']}")
+                    return data_info["s3_path"]
+            
+            # Fallback to fresh training data if production data not available
+            logger.info("ℹ️ [AUTO-RETRAIN] Production inference data not available, trying fresh training data")
+            response = await client.get(f"{self.training_service_url}/data/fresh-data")
+            
+            if response.status_code == 200:
+                self.circuit_breakers["training"].record_success()
+                data_info = response.json()
+                if data_info and len(data_info) > 0:
+                    # Get the most recent data file
+                    latest_data = max(data_info, key=lambda x: x.get("timestamp", ""))
+                    logger.info(f"✅ [AUTO-RETRAIN] Using fresh training data: {latest_data.get('s3_path')}")
+                    return latest_data.get("s3_path")
+            
+            self.circuit_breakers["training"].record_failure()
+            logger.warning("⚠️ [AUTO-RETRAIN] No training data available")
+            return None
                 
         except Exception as e:
             self.circuit_breakers["training"].record_failure()
@@ -427,26 +427,26 @@ class AutoRetrainService:
             response = await client.get(
                 f"{self.training_service_url}/jobs/{event.retrain_job_id}"
             )
+            
+            if response.status_code == 200:
+                self.circuit_breakers["training"].record_success()
+                job_info = response.json()
+                status = job_info.get("status", "unknown")
                 
-                if response.status_code == 200:
-                    self.circuit_breakers["training"].record_success()
-                    job_info = response.json()
-                    status = job_info.get("status", "unknown")
+                if status == "completed":
+                    event.status = "completed"
+                    logger.info(f"✅ [AUTO-RETRAIN] Retrain job completed: {event.retrain_job_id}")
                     
-                    if status == "completed":
-                        event.status = "completed"
-                        logger.info(f"✅ [AUTO-RETRAIN] Retrain job completed: {event.retrain_job_id}")
-                        
-                        # Trigger model promotion
-                        await self._promote_retrained_model(event)
-                        
-                    elif status == "failed":
-                        event.status = "failed"
-                        event.error_message = job_info.get("error_message", "Unknown error")
-                        logger.error(f"❌ [AUTO-RETRAIN] Retrain job failed: {event.retrain_job_id}")
-                else:
-                    self.circuit_breakers["training"].record_failure()
-                    logger.warning(f"⚠️ [AUTO-RETRAIN] Failed to get job status: {response.status_code}")
+                    # Trigger model promotion
+                    await self._promote_retrained_model(event)
+                    
+                elif status == "failed":
+                    event.status = "failed"
+                    event.error_message = job_info.get("error_message", "Unknown error")
+                    logger.error(f"❌ [AUTO-RETRAIN] Retrain job failed: {event.retrain_job_id}")
+            else:
+                self.circuit_breakers["training"].record_failure()
+                logger.warning(f"⚠️ [AUTO-RETRAIN] Failed to get job status: {response.status_code}")
                         
         except Exception as e:
             self.circuit_breakers["training"].record_failure()
@@ -479,13 +479,13 @@ class AutoRetrainService:
                     "threshold": event.threshold
                 }
             )
-                
-                if response.status_code == 200:
-                    self.circuit_breakers["training"].record_success()
-                    logger.info(f"✅ [AUTO-RETRAIN] Model promoted successfully: {event.model_name}")
-                else:
-                    self.circuit_breakers["training"].record_failure()
-                    logger.warning(f"⚠️ [AUTO-RETRAIN] Model promotion failed: {response.status_code}")
+            
+            if response.status_code == 200:
+                self.circuit_breakers["training"].record_success()
+                logger.info(f"✅ [AUTO-RETRAIN] Model promoted successfully: {event.model_name}")
+            else:
+                self.circuit_breakers["training"].record_failure()
+                logger.warning(f"⚠️ [AUTO-RETRAIN] Model promotion failed: {response.status_code}")
                     
         except Exception as e:
             self.circuit_breakers["training"].record_failure()

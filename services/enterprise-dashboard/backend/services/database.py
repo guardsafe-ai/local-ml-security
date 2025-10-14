@@ -8,6 +8,7 @@ import asyncpg
 import os
 from typing import Dict, Any, Optional, List
 from datetime import datetime
+from contextlib import asynccontextmanager
 
 logger = logging.getLogger(__name__)
 
@@ -26,9 +27,16 @@ class DatabaseService:
         try:
             self.connection_pool = await asyncpg.create_pool(
                 self.database_url,
-                min_size=1,
-                max_size=10,
-                command_timeout=60
+                min_size=5,
+                max_size=20,
+                max_queries=50000,  # Recycle connections after 50k queries
+                max_inactive_connection_lifetime=300,  # 5 min idle timeout
+                timeout=30,  # 30s connection acquire timeout
+                command_timeout=60,  # 60s query timeout
+                server_settings={
+                    'jit': 'off',
+                    'statement_timeout': '60000'  # 60s statement timeout
+                }
             )
             logger.info("✅ Database connection pool initialized")
         except Exception as e:
@@ -70,6 +78,29 @@ class DatabaseService:
         except Exception as e:
             logger.error(f"❌ Database fetchone failed: {e}")
             raise
+    
+    @asynccontextmanager
+    async def transaction(self):
+        """
+        Database transaction context manager with automatic rollback
+        
+        Usage:
+            async with db.transaction() as conn:
+                await conn.execute("UPDATE ...")
+                await conn.execute("INSERT ...")
+                # Auto-commits on success, auto-rolls back on exception
+        """
+        if not self.connection_pool:
+            raise RuntimeError("Database not connected")
+        
+        async with self.connection_pool.acquire() as conn:
+            async with conn.transaction():
+                try:
+                    yield conn
+                    logger.debug("Transaction committed successfully")
+                except Exception as e:
+                    logger.error(f"Transaction failed, rolling back: {e}")
+                    raise  # Re-raise to maintain exception flow
 
 # Global database service instance
 db_service = DatabaseService()

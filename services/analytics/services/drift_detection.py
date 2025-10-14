@@ -23,8 +23,15 @@ from sklearn.metrics import (
 from sklearn.calibration import calibration_curve
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 import warnings
-warnings.filterwarnings("ignore")
+# Targeted warning suppression - only suppress specific warnings that are expected
+warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
+warnings.filterwarnings("ignore", category=FutureWarning, module="sklearn")
+warnings.filterwarnings("ignore", category=ConvergenceWarning, module="sklearn")
+warnings.filterwarnings("ignore", category=RuntimeWarning, module="scipy")
+logger.debug("🔇 [WARNINGS] Applied targeted warning filters for drift detection")
 
 from .email_notifications import email_service
 
@@ -97,6 +104,117 @@ class DriftDetector:
         self.reference_data = {}
         self.drift_history = []
         self.sliding_windows = {}  # model_name -> sliding window data
+        self.baseline_metrics = {}
+        self.baseline_established = False
+        self.baseline_sample_count = 0
+        self.min_baseline_samples = 100  # Minimum samples needed to establish baseline
+    
+    async def establish_baseline(self, model_name: str, reference_data: pd.DataFrame = None) -> Dict[str, Any]:
+        """
+        Establish baseline metrics for drift detection
+        
+        Args:
+            model_name: Name of the model
+            reference_data: Reference dataset (if None, uses production data)
+        
+        Returns:
+            Baseline metrics and status
+        """
+        try:
+            logger.info(f"📊 [BASELINE] Establishing baseline for model {model_name}")
+            
+            if reference_data is None:
+                # Use production data from last 7 days to establish baseline
+                reference_data = await self.get_production_inference_data(model_name, hours=168)  # 7 days
+            
+            if len(reference_data) < self.min_baseline_samples:
+                logger.warning(f"⚠️ [BASELINE] Insufficient data for baseline: {len(reference_data)} < {self.min_baseline_samples}")
+                return {
+                    "status": "insufficient_data",
+                    "sample_count": len(reference_data),
+                    "min_required": self.min_baseline_samples
+                }
+            
+            # Calculate baseline metrics
+            baseline_metrics = {
+                "model_name": model_name,
+                "sample_count": len(reference_data),
+                "established_at": datetime.now().isoformat(),
+                "data_distribution": {},
+                "performance_metrics": {},
+                "feature_statistics": {}
+            }
+            
+            # Calculate data distribution metrics
+            if 'input_text' in reference_data.columns:
+                text_lengths = reference_data['input_text'].str.len()
+                baseline_metrics["data_distribution"] = {
+                    "text_length_mean": float(text_lengths.mean()),
+                    "text_length_std": float(text_lengths.std()),
+                    "text_length_min": int(text_lengths.min()),
+                    "text_length_max": int(text_lengths.max()),
+                    "text_length_median": float(text_lengths.median())
+                }
+            
+            # Calculate performance metrics if available
+            if 'confidence' in reference_data.columns:
+                confidences = reference_data['confidence']
+                baseline_metrics["performance_metrics"] = {
+                    "confidence_mean": float(confidences.mean()),
+                    "confidence_std": float(confidences.std()),
+                    "confidence_min": float(confidences.min()),
+                    "confidence_max": float(confidences.max())
+                }
+            
+            # Calculate prediction distribution
+            if 'prediction' in reference_data.columns:
+                pred_counts = reference_data['prediction'].value_counts()
+                baseline_metrics["prediction_distribution"] = pred_counts.to_dict()
+            
+            # Store baseline
+            self.baseline_metrics[model_name] = baseline_metrics
+            self.baseline_established = True
+            self.baseline_sample_count = len(reference_data)
+            
+            # Store reference data for comparison
+            self.reference_data[model_name] = reference_data
+            
+            logger.info(f"✅ [BASELINE] Established baseline for {model_name}: {len(reference_data)} samples")
+            logger.info(f"📊 [BASELINE] Text length: {baseline_metrics['data_distribution'].get('text_length_mean', 'N/A'):.1f} ± {baseline_metrics['data_distribution'].get('text_length_std', 'N/A'):.1f}")
+            
+            return {
+                "status": "established",
+                "baseline_metrics": baseline_metrics
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ [BASELINE] Error establishing baseline for {model_name}: {e}")
+            return {
+                "status": "error",
+                "error": str(e)
+            }
+    
+    def get_baseline_status(self, model_name: str) -> Dict[str, Any]:
+        """Get current baseline status for a model"""
+        if model_name not in self.baseline_metrics:
+            return {
+                "status": "not_established",
+                "baseline_established": False
+            }
+        
+        baseline = self.baseline_metrics[model_name]
+        return {
+            "status": "established",
+            "baseline_established": True,
+            "sample_count": baseline["sample_count"],
+            "established_at": baseline["established_at"],
+            "data_distribution": baseline.get("data_distribution", {}),
+            "performance_metrics": baseline.get("performance_metrics", {})
+        }
+    
+    def is_baseline_established(self, model_name: str) -> bool:
+        """Check if baseline is established for a model"""
+        return model_name in self.baseline_metrics and self.baseline_established
         
     async def get_production_inference_data(self, model_name: str, hours: int = 24) -> pd.DataFrame:
         """Get production inference data from prediction logs"""
@@ -303,14 +421,16 @@ class DriftDetector:
         
     def detect_data_drift(self, current_data: pd.DataFrame, 
                          reference_data: pd.DataFrame = None,
-                         feature_columns: List[str] = None) -> Dict[str, Any]:
+                         feature_columns: List[str] = None,
+                         model_name: str = None) -> Dict[str, Any]:
         """
-        Detect data drift between reference and current data
+        Detect data drift between reference and current data with baseline comparison
         
         Args:
             current_data: Current data to test
-            reference_data: Reference data (if None, uses stored reference)
+            reference_data: Reference data (if None, uses stored reference or baseline)
             feature_columns: Columns to test for drift
+            model_name: Model name for baseline lookup
             
         Returns:
             Drift detection results
@@ -318,7 +438,11 @@ class DriftDetector:
         import time
         start_time = time.time()
         try:
-            if reference_data is None:
+            # Use baseline data if available and no reference data provided
+            if reference_data is None and model_name and self.is_baseline_established(model_name):
+                reference_data = self.reference_data.get(model_name)
+                logger.info(f"📊 [DRIFT] Using baseline data for {model_name}: {len(reference_data)} samples")
+            elif reference_data is None:
                 reference_data = self.reference_data.get('data')
                 if reference_data is None:
                     return {"error": "No reference data available"}
@@ -430,6 +554,112 @@ class DriftDetector:
                 operation_type="drift_detection",
                 model_name="unknown"
             ).observe(time.time() - start_time)
+    
+    def detect_semantic_drift(self, current_texts: List[str], reference_texts: List[str] = None) -> Dict[str, Any]:
+        """
+        Detect semantic drift in text data using embedding-based similarity
+        
+        Args:
+            current_texts: Current text data to test
+            reference_texts: Reference text data (if None, uses stored reference)
+            
+        Returns:
+            Semantic drift detection results
+        """
+        import time
+        start_time = time.time()
+        
+        try:
+            if reference_texts is None:
+                reference_texts = self.reference_data.get('texts', [])
+                if not reference_texts:
+                    return {"error": "No reference text data available"}
+            
+            if len(current_texts) < 10 or len(reference_texts) < 10:
+                return {"error": "Insufficient text data for semantic drift detection"}
+            
+            # Create TF-IDF vectors for both datasets
+            vectorizer = TfidfVectorizer(
+                max_features=1000,
+                stop_words='english',
+                ngram_range=(1, 2),
+                min_df=2
+            )
+            
+            # Fit on reference data and transform both datasets
+            ref_vectors = vectorizer.fit_transform(reference_texts)
+            curr_vectors = vectorizer.transform(current_texts)
+            
+            # Calculate mean vectors for each dataset
+            ref_mean = np.mean(ref_vectors.toarray(), axis=0)
+            curr_mean = np.mean(curr_vectors.toarray(), axis=0)
+            
+            # Calculate cosine similarity between mean vectors
+            cosine_sim = cosine_similarity([ref_mean], [curr_mean])[0][0]
+            semantic_drift_score = 1 - cosine_sim  # Higher score = more drift
+            
+            # Calculate distribution similarity using JS divergence
+            js_divergence = self._calculate_js_divergence(ref_vectors, curr_vectors)
+            
+            # Determine drift severity
+            drift_detected = semantic_drift_score > 0.1 or js_divergence > 0.1
+            severity = "high" if semantic_drift_score > 0.2 or js_divergence > 0.2 else "medium" if drift_detected else "low"
+            
+            # Calculate vocabulary overlap
+            ref_vocab = set(vectorizer.get_feature_names_out())
+            curr_vocab = set(vectorizer.get_feature_names_out())
+            vocab_overlap = len(ref_vocab & curr_vocab) / len(ref_vocab | curr_vocab) if ref_vocab | curr_vocab else 0
+            
+            results = {
+                "timestamp": datetime.now().isoformat(),
+                "drift_detected": drift_detected,
+                "semantic_drift_score": float(semantic_drift_score),
+                "cosine_similarity": float(cosine_sim),
+                "js_divergence": float(js_divergence),
+                "vocab_overlap": float(vocab_overlap),
+                "severity": severity,
+                "reference_samples": len(reference_texts),
+                "current_samples": len(current_texts),
+                "processing_time_ms": (time.time() - start_time) * 1000
+            }
+            
+            logger.info(f"✅ [SEMANTIC DRIFT] Score: {semantic_drift_score:.3f}, JS Divergence: {js_divergence:.3f}, Severity: {severity}")
+            
+            return results
+            
+        except Exception as e:
+            logger.error(f"❌ [SEMANTIC DRIFT] Error detecting semantic drift: {e}")
+            return {
+                "error": str(e),
+                "timestamp": datetime.now().isoformat()
+            }
+    
+    def _calculate_js_divergence(self, ref_vectors, curr_vectors, bins=10):
+        """Calculate Jensen-Shannon divergence between vector distributions"""
+        try:
+            # Convert sparse matrices to dense for calculation
+            ref_dense = ref_vectors.toarray()
+            curr_dense = curr_vectors.toarray()
+            
+            # Calculate mean vectors
+            ref_mean = np.mean(ref_dense, axis=0)
+            curr_mean = np.mean(curr_dense, axis=0)
+            
+            # Normalize to probability distributions
+            ref_prob = ref_mean / (np.sum(ref_mean) + 1e-10)
+            curr_prob = curr_mean / (np.sum(curr_mean) + 1e-10)
+            
+            # Calculate JS divergence
+            m = 0.5 * (ref_prob + curr_prob)
+            kl_ref = np.sum(ref_prob * np.log((ref_prob + 1e-10) / (m + 1e-10)))
+            kl_curr = np.sum(curr_prob * np.log((curr_prob + 1e-10) / (m + 1e-10)))
+            js_div = 0.5 * (kl_ref + kl_curr)
+            
+            return js_div
+            
+        except Exception as e:
+            logger.warning(f"⚠️ [JS DIVERGENCE] Error calculating JS divergence: {e}")
+            return 0.0
     
     def detect_model_performance_drift(self, old_model_predictions: List[Dict[str, Any]], 
                                      new_model_predictions: List[Dict[str, Any]], 

@@ -19,14 +19,6 @@ The Monitoring Service is the **real-time observability and alerting engine** of
 http://monitoring:8006
 ```
 
-### Authentication
-All endpoints require authentication headers:
-```javascript
-headers: {
-  'Authorization': 'Bearer <token>',
-  'Content-Type': 'application/json'
-}
-```
 
 ### Core Monitoring Endpoints
 

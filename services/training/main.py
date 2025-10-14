@@ -4,6 +4,8 @@ Model training service with modular architecture
 """
 
 import logging
+import signal
+import asyncio
 from datetime import datetime
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,6 +26,7 @@ from utils.logging import setup_logging
 from utils.config import get_config
 from database.async_connection import db_manager
 from efficient_data_manager import EfficientDataManager
+from utils.enhanced_logging import get_training_logger, log_training_error, log_training_event
 import httpx
 import asyncio
 from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
@@ -200,19 +203,83 @@ async def startup_event():
         logger.error(f"Failed to initialize training service: {e}")
         raise
 
+# Graceful shutdown handler
+class GracefulShutdown:
+    """Handles graceful shutdown of the training service"""
+    
+    def __init__(self, app):
+        self.app = app
+        self.is_shutting_down = False
+        self.shutdown_timeout = 30  # seconds
+        self.pending_tasks = set()
+        logger.info("GracefulShutdown handler initialized for training service.")
+    
+    def register_handlers(self):
+        """Register signal handlers for graceful shutdown."""
+        if hasattr(signal, 'SIGTERM'):
+            signal.signal(signal.SIGTERM, self.shutdown_handler)
+        if hasattr(signal, 'SIGINT'):
+            signal.signal(signal.SIGINT, self.shutdown_handler)
+        logger.info("Registered SIGTERM and SIGINT handlers for training service.")
+        
+        @self.app.on_event("shutdown")
+        async def _on_shutdown():
+            await self._perform_cleanup()
+    
+    async def shutdown_handler(self, signum, frame):
+        """Handle shutdown signals."""
+        if self.is_shutting_down:
+            logger.warning("Training service already in shutdown process, ignoring signal.")
+            return
+        
+        self.is_shutting_down = True
+        logger.info(f"Training service received signal {signum}, initiating graceful shutdown...")
+        
+        # Trigger FastAPI's shutdown event
+        await self.app.shutdown()
+    
+    async def _perform_cleanup(self):
+        """Perform actual cleanup tasks."""
+        logger.info("Performing graceful shutdown cleanup for training service...")
+        
+        # Cancel any pending background tasks
+        if self.pending_tasks:
+            logger.info(f"Cancelling {len(self.pending_tasks)} pending background tasks...")
+            for task in list(self.pending_tasks):
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    logger.debug(f"Task {task.get_name()} cancelled.")
+                except Exception as e:
+                    logger.error(f"Error during task cancellation: {e}")
+            self.pending_tasks.clear()
+            logger.info("All pending tasks cancelled.")
+        
+        # Close training queue
+        try:
+            await training_queue.close()
+            logger.info("Training queue closed.")
+        except Exception as e:
+            logger.error(f"Error closing training queue: {e}")
+        
+        # Close database connections
+        try:
+            await db_manager.disconnect()
+            logger.info("Database connection pool closed.")
+        except Exception as e:
+            logger.error(f"Error closing database connections: {e}")
+        
+        logger.info("Training service graceful shutdown cleanup complete.")
+
+# Initialize graceful shutdown
+shutdown_handler = GracefulShutdown(app)
+shutdown_handler.register_handlers()
+
 @app.on_event("shutdown")
 async def shutdown_event():
     """Cleanup on shutdown"""
-    logger.info("Training service shutting down...")
-    try:
-        # Close training queue
-        await training_queue.close()
-        logger.info("✅ Training queue closed")
-        
-        await db_manager.disconnect()
-        logger.info("✅ Training service shutdown completed")
-    except Exception as e:
-        logger.error(f"❌ Error during shutdown: {e}")
+    await shutdown_handler._perform_cleanup()
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8002)
