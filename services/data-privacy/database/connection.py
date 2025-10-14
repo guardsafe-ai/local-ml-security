@@ -49,10 +49,17 @@ class DatabaseManager:
             logger.info("Database connection pool closed")
     
     async def execute_query(self, query: str, *args) -> list:
-        """Execute a query and return results"""
+        """Execute a query and return results with query monitoring"""
         if not self.pool:
             raise Exception("Database not connected")
         
+        from utils.query_monitoring import monitor_query
+        
+        async with monitor_query("execute_query", self._execute_query_impl, query, *args) as result:
+            return result
+    
+    async def _execute_query_impl(self, query: str, *args) -> list:
+        """Internal implementation of execute_query without monitoring"""
         async with self.pool.acquire() as connection:
             try:
                 results = await connection.fetch(query, *args)
@@ -85,10 +92,17 @@ class DatabaseManager:
                     raise  # Re-raise to maintain exception flow
 
     async def execute_command(self, command: str, *args) -> str:
-        """Execute a command and return status"""
+        """Execute a command and return status with query monitoring"""
         if not self.pool:
             raise Exception("Database not connected")
         
+        from utils.query_monitoring import monitor_query
+        
+        async with monitor_query("execute_command", self._execute_command_impl, command, *args) as result:
+            return result
+    
+    async def _execute_command_impl(self, command: str, *args) -> str:
+        """Internal implementation of execute_command without monitoring"""
         async with self.pool.acquire() as connection:
             try:
                 result = await connection.execute(command, *args)

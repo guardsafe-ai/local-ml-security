@@ -101,8 +101,13 @@ class DatabaseManager:
                 raise
     
     async def execute_query(self, query: str, *args) -> List[Dict[str, Any]]:
-        """Execute a SELECT query and return results as list of dicts"""
-        async with self.get_connection() as conn:
+        """Execute a SELECT query and return results as list of dicts with monitoring"""
+        async with monitor_query("execute_query", self._execute_query_impl, query, *args) as result:
+            return result
+    
+    async def _execute_query_impl(self, query: str, *args) -> List[Dict[str, Any]]:
+        """Internal implementation of execute_query without monitoring"""
+        async with self.pool.acquire() as conn:
             try:
                 rows = await conn.fetch(query, *args)
                 return [dict(row) for row in rows]
@@ -116,8 +121,8 @@ class DatabaseManager:
             return result
     
     async def _execute_command_impl(self, command: str, *args) -> str:
-        """Internal implementation of execute_command"""
-        async with self.get_connection() as conn:
+        """Internal implementation of execute_command without monitoring"""
+        async with self.pool.acquire() as conn:
             try:
                 result = await conn.execute(command, *args)
                 return result
@@ -131,8 +136,8 @@ class DatabaseManager:
             return result
     
     async def _fetch_one_impl(self, query: str, *args) -> Optional[Dict[str, Any]]:
-        """Internal implementation of fetch_one"""
-        async with self.get_connection() as conn:
+        """Internal implementation of fetch_one without monitoring"""
+        async with self.pool.acquire() as conn:
             try:
                 row = await conn.fetchrow(query, *args)
                 return dict(row) if row else None
@@ -146,8 +151,8 @@ class DatabaseManager:
             return result
     
     async def _fetch_many_impl(self, query: str, *args, limit: int = 1000) -> List[Dict[str, Any]]:
-        """Internal implementation of fetch_many"""
-        async with self.get_connection() as conn:
+        """Internal implementation of fetch_many without monitoring"""
+        async with self.pool.acquire() as conn:
             try:
                 rows = await conn.fetch(query, *args)
                 return [dict(row) for row in rows[:limit]]
@@ -204,7 +209,7 @@ class DatabaseManager:
     async def initialize_schema(self):
         """Initialize analytics database schema"""
         try:
-            async with self.get_connection() as conn:
+            async with self.pool.acquire() as conn:
                 # Create analytics schema if it doesn't exist
                 await conn.execute("CREATE SCHEMA IF NOT EXISTS analytics")
                 

@@ -2243,6 +2243,62 @@ async def metrics():
     from fastapi import Response
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
+# Query performance monitoring endpoints
+@app.get("/query-performance")
+async def get_query_performance():
+    """Get query performance metrics"""
+    try:
+        from utils.query_monitoring import get_model_api_query_monitor
+        monitor = await get_model_api_query_monitor()
+        summary = monitor.get_performance_summary()
+        
+        # Calculate overall statistics
+        total_queries = sum(metrics["total_calls"] for metrics in summary.values())
+        successful_queries = sum(metrics["successful_calls"] for metrics in summary.values())
+        failed_queries = sum(metrics["failed_calls"] for metrics in summary.values())
+        timeout_violations = sum(metrics["timeout_violations"] for metrics in summary.values())
+        slow_queries = sum(metrics["slow_queries"] for metrics in summary.values())
+        
+        return {
+            "total_queries": total_queries,
+            "successful_queries": successful_queries,
+            "failed_queries": failed_queries,
+            "timeout_violations": timeout_violations,
+            "slow_queries": slow_queries,
+            "success_rate": successful_queries / total_queries if total_queries > 0 else 0,
+            "avg_duration_ms": sum(float(metrics["avg_duration_ms"]) for metrics in summary.values()) / len(summary) if summary else 0,
+            "max_duration_ms": max(float(metrics["max_duration_ms"]) for metrics in summary.values()) if summary else 0,
+            "timeout_threshold_ms": 5000,
+            "slow_query_threshold_ms": 1000,
+            "query_details": summary
+        }
+    except Exception as e:
+        logger.error(f"Error getting query performance: {e}")
+        return {"error": str(e)}
+
+@app.post("/query-performance/log")
+async def log_query_performance_endpoint():
+    """Log current query performance summary"""
+    try:
+        from utils.query_monitoring import log_model_api_query_performance
+        await log_model_api_query_performance()
+        return {"message": "Query performance logged successfully"}
+    except Exception as e:
+        logger.error(f"Error logging query performance: {e}")
+        return {"error": str(e)}
+
+@app.post("/query-performance/clear")
+async def clear_query_metrics():
+    """Clear query performance metrics"""
+    try:
+        from utils.query_monitoring import get_model_api_query_monitor
+        monitor = await get_model_api_query_monitor()
+        monitor.clear_metrics()
+        return {"message": "Query metrics cleared successfully"}
+    except Exception as e:
+        logger.error(f"Error clearing query metrics: {e}")
+        return {"error": str(e)}
+
 @app.post("/test-predict")
 async def test_predict(request: PredictionRequest):
     """Simple test prediction endpoint"""

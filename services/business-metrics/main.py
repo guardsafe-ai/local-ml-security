@@ -26,6 +26,7 @@ sys.path.append('/app')
 from tracing_setup import setup_tracing, get_tracer, trace_request, add_span_attributes
 from utils.circuit_breaker import get_database_breaker, get_redis_breaker, get_external_api_breaker
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from database.connection import DatabaseManager
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -69,7 +70,7 @@ class BusinessMetricsService:
             "postgresql://mlflow:password@postgres:5432/ml_security_consolidated"
         )
         self.redis_url = os.getenv("REDIS_URL", "redis://redis:6379/1")
-        self.conn_pool = None
+        self.db_manager = DatabaseManager()
         self.redis_client = None
         self.metrics_buffer = []
         self.buffer_size = 100
@@ -78,18 +79,8 @@ class BusinessMetricsService:
     async def initialize(self):
         """Initialize database and Redis connections with timeout configuration"""
         try:
-            # Import service-specific timeout configuration
-            from utils.database_timeouts import get_business_metrics_timeout_config, log_timeout_config
-            
-            # Get timeout configuration for business-metrics service
-            timeout_config = get_business_metrics_timeout_config()
-            log_timeout_config(timeout_config)
-            
-            # Initialize PostgreSQL connection pool with timeout configuration
-            self.conn_pool = await asyncpg.create_pool(
-                self.db_url,
-                **timeout_config.get_pool_config()
-            )
+            # Initialize database manager with timeout configuration
+            await self.db_manager.connect()
             await self._create_tables()
             
             # Initialize Redis client
@@ -109,40 +100,53 @@ class BusinessMetricsService:
     
     async def close(self):
         """Close connections"""
-        if self.conn_pool:
-            await self.conn_pool.close()
+        if self.db_manager:
+            await self.db_manager.disconnect()
         if self.redis_client:
             await self.redis_client.close()
         logger.info("✅ Business Metrics Service closed")
     
     async def _create_tables(self):
-        """Create metrics tables"""
-        async with self.conn_pool.acquire() as conn:
-            # Business metrics table
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS business_metrics (
-                    id SERIAL PRIMARY KEY,
-                    metric_name VARCHAR(255) NOT NULL,
-                    value DOUBLE PRECISION NOT NULL,
-                    timestamp TIMESTAMPTZ NOT NULL,
-                    tags JSONB,
-                    metadata JSONB,
-                    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-                );
-            """)
-            
-            # Create indexes
-            await conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_business_metrics_name_time 
-                ON business_metrics(metric_name, timestamp);
-            """)
-            
-            await conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_business_metrics_timestamp 
-                ON business_metrics(timestamp);
-            """)
-            
-            logger.info("✅ Business metrics tables created")
+        """Create metrics tables with query monitoring"""
+        # Business metrics table
+        await self.db_manager.execute_command("""
+            CREATE TABLE IF NOT EXISTS business_metrics (
+                id SERIAL PRIMARY KEY,
+                metric_name VARCHAR(255) NOT NULL,
+                value DOUBLE PRECISION NOT NULL,
+                timestamp TIMESTAMPTZ NOT NULL,
+                tags JSONB,
+                metadata JSONB,
+                created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        
+        # Metrics summary table for aggregation
+        await self.db_manager.execute_command("""
+            CREATE TABLE IF NOT EXISTS metrics_summary (
+                metric_name VARCHAR(255) NOT NULL,
+                time_bucket TIMESTAMPTZ NOT NULL,
+                count_metrics INTEGER NOT NULL,
+                sum_value DOUBLE PRECISION NOT NULL,
+                avg_value DOUBLE PRECISION NOT NULL,
+                min_value DOUBLE PRECISION NOT NULL,
+                max_value DOUBLE PRECISION NOT NULL,
+                PRIMARY KEY (metric_name, time_bucket)
+            );
+        """)
+        
+        # Create indexes
+        await self.db_manager.execute_command("""
+            CREATE INDEX IF NOT EXISTS idx_business_metrics_name_time 
+            ON business_metrics(metric_name, timestamp);
+        """)
+        
+        await self.db_manager.execute_command("""
+            CREATE INDEX IF NOT EXISTS idx_business_metrics_timestamp 
+            ON business_metrics(timestamp);
+        """)
+        
+        logger.info("✅ Business metrics tables created")
     
     async def record_metric(self, metric: MetricData):
         """Record a business metric"""
@@ -176,26 +180,25 @@ class BusinessMetricsService:
             return
         
         try:
-            # Use transaction for batch metric insertion
-            async with self.conn_pool.acquire() as conn:
-                async with conn.transaction():
-                    # Insert all metrics in a single transaction
-                    for metric in self.metrics_buffer:
-                        await conn.execute(
-                            """
-                            INSERT INTO business_metrics 
-                            (metric_name, value, timestamp, tags, metadata)
-                            VALUES ($1, $2, $3, $4, $5)
-                            """,
-                            metric.metric_name,
-                            metric.value,
-                            metric.timestamp,
-                            json.dumps(metric.tags),
-                            json.dumps(metric.metadata)
-                        )
-                    
-                    # Update metrics summary in the same transaction
-                    await self._update_metrics_summary(conn)
+            # Use database manager transaction for batch metric insertion
+            async with self.db_manager.transaction() as conn:
+                # Insert all metrics in a single transaction
+                for metric in self.metrics_buffer:
+                    await conn.execute(
+                        """
+                        INSERT INTO business_metrics 
+                        (metric_name, value, timestamp, tags, metadata)
+                        VALUES ($1, $2, $3, $4, $5)
+                        """,
+                        metric.metric_name,
+                        metric.value,
+                        metric.timestamp,
+                        json.dumps(metric.tags),
+                        json.dumps(metric.metadata)
+                    )
+                
+                # Update metrics summary in the same transaction
+                await self._update_metrics_summary(conn)
             
             # Clear buffer after successful transaction
             self.metrics_buffer.clear()
@@ -332,9 +335,10 @@ class BusinessMetricsService:
             
             params.append(limit)
             
-            # Execute single optimized query
-            async with self.conn_pool.acquire() as conn:
-                result = await conn.fetchrow(cte_query, *params)
+            # Execute single optimized query with query monitoring
+            result = await self.db_manager.execute_query(cte_query, *params)
+            if result:
+                result = result[0]  # Get first row from results
                 
                 # Parse JSON results from database
                 data_points_raw = json.loads(result['data_points']) if result['data_points'] else []
@@ -379,8 +383,7 @@ class BusinessMetricsService:
             # Check database connection
             db_healthy = False
             try:
-                async with self.conn_pool.acquire() as conn:
-                    await conn.fetchval("SELECT 1")
+                result = await self.db_manager.execute_query("SELECT 1")
                 db_healthy = True
             except:
                 pass
@@ -484,6 +487,62 @@ async def prometheus_metrics():
     """Prometheus metrics endpoint"""
     from fastapi import Response
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+# Query performance monitoring endpoints
+@app.get("/query-performance")
+async def get_query_performance():
+    """Get query performance metrics"""
+    try:
+        from utils.query_monitoring import get_business_metrics_query_monitor
+        monitor = await get_business_metrics_query_monitor()
+        summary = monitor.get_performance_summary()
+        
+        # Calculate overall statistics
+        total_queries = sum(metrics["total_calls"] for metrics in summary.values())
+        successful_queries = sum(metrics["successful_calls"] for metrics in summary.values())
+        failed_queries = sum(metrics["failed_calls"] for metrics in summary.values())
+        timeout_violations = sum(metrics["timeout_violations"] for metrics in summary.values())
+        slow_queries = sum(metrics["slow_queries"] for metrics in summary.values())
+        
+        return {
+            "total_queries": total_queries,
+            "successful_queries": successful_queries,
+            "failed_queries": failed_queries,
+            "timeout_violations": timeout_violations,
+            "slow_queries": slow_queries,
+            "success_rate": successful_queries / total_queries if total_queries > 0 else 0,
+            "avg_duration_ms": sum(float(metrics["avg_duration_ms"]) for metrics in summary.values()) / len(summary) if summary else 0,
+            "max_duration_ms": max(float(metrics["max_duration_ms"]) for metrics in summary.values()) if summary else 0,
+            "timeout_threshold_ms": 5000,
+            "slow_query_threshold_ms": 1000,
+            "query_details": summary
+        }
+    except Exception as e:
+        logger.error(f"Error getting query performance: {e}")
+        return {"error": str(e)}
+
+@app.post("/query-performance/log")
+async def log_query_performance_endpoint():
+    """Log current query performance summary"""
+    try:
+        from utils.query_monitoring import log_business_metrics_query_performance
+        await log_business_metrics_query_performance()
+        return {"message": "Query performance logged successfully"}
+    except Exception as e:
+        logger.error(f"Error logging query performance: {e}")
+        return {"error": str(e)}
+
+@app.post("/query-performance/clear")
+async def clear_query_metrics():
+    """Clear query performance metrics"""
+    try:
+        from utils.query_monitoring import get_business_metrics_query_monitor
+        monitor = await get_business_metrics_query_monitor()
+        monitor.clear_metrics()
+        return {"message": "Query metrics cleared successfully"}
+    except Exception as e:
+        logger.error(f"Error clearing query metrics: {e}")
+        return {"error": str(e)}
 
 @app.get("/metrics/summary")
 async def get_metrics_summary():

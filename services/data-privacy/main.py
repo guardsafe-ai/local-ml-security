@@ -136,14 +136,14 @@ class DataPrivacyService:
             
             logger.info("✅ Data Privacy Service initialized")
             
-    except Exception as e:
+        except Exception as e:
             from utils.enhanced_logging import log_error_with_context
             log_error_with_context(
                 error=e,
                 operation="data_privacy_initialization",
                 additional_context={"service": "data-privacy"}
             )
-        raise
+            raise
     
     async def close(self):
         """Close connections"""
@@ -462,12 +462,14 @@ class DataPrivacyService:
                     method.value, privacy_score, compliance_status
                 ))
                 
-    except Exception as e:
+        except Exception as e:
             logger.error(f"❌ Failed to store anonymization log: {e}")
     
     async def generate_compliance_report(self) -> ComplianceReport:
-        """Generate compliance report"""
-        try:
+        """Generate compliance report with query monitoring"""
+        from utils.query_monitoring import monitor_query
+        
+        async def _generate_compliance_report_impl():
             async with self.conn_pool.acquire() as conn:
                 # Get total datasets
                 total_datasets = await conn.fetchval("SELECT COUNT(DISTINCT data_id) FROM data_classifications")
@@ -486,6 +488,10 @@ class DataPrivacyService:
                     ORDER BY privacy_score ASC
                 """)
                 
+                return total_datasets, compliant_datasets, violations
+        
+        try:
+            async with monitor_query("generate_compliance_report", _generate_compliance_report_impl) as (total_datasets, compliant_datasets, violations):
                 non_compliant_datasets = len(violations)
                 compliance_percentage = (compliant_datasets / total_datasets * 100) if total_datasets > 0 else 0
                 
@@ -579,6 +585,62 @@ async def prometheus_metrics():
     """Prometheus metrics endpoint"""
     from fastapi import Response
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+# Query performance monitoring endpoints
+@app.get("/query-performance")
+async def get_query_performance():
+    """Get query performance metrics"""
+    try:
+        from utils.query_monitoring import get_data_privacy_query_monitor
+        monitor = await get_data_privacy_query_monitor()
+        summary = monitor.get_performance_summary()
+        
+        # Calculate overall statistics
+        total_queries = sum(metrics["total_calls"] for metrics in summary.values())
+        successful_queries = sum(metrics["successful_calls"] for metrics in summary.values())
+        failed_queries = sum(metrics["failed_calls"] for metrics in summary.values())
+        timeout_violations = sum(metrics["timeout_violations"] for metrics in summary.values())
+        slow_queries = sum(metrics["slow_queries"] for metrics in summary.values())
+        
+        return {
+            "total_queries": total_queries,
+            "successful_queries": successful_queries,
+            "failed_queries": failed_queries,
+            "timeout_violations": timeout_violations,
+            "slow_queries": slow_queries,
+            "success_rate": successful_queries / total_queries if total_queries > 0 else 0,
+            "avg_duration_ms": sum(float(metrics["avg_duration_ms"]) for metrics in summary.values()) / len(summary) if summary else 0,
+            "max_duration_ms": max(float(metrics["max_duration_ms"]) for metrics in summary.values()) if summary else 0,
+            "timeout_threshold_ms": 5000,
+            "slow_query_threshold_ms": 1000,
+            "query_details": summary
+        }
+    except Exception as e:
+        logger.error(f"Error getting query performance: {e}")
+        return {"error": str(e)}
+
+@app.post("/query-performance/log")
+async def log_query_performance_endpoint():
+    """Log current query performance summary"""
+    try:
+        from utils.query_monitoring import log_data_privacy_query_performance
+        await log_data_privacy_query_performance()
+        return {"message": "Query performance logged successfully"}
+    except Exception as e:
+        logger.error(f"Error logging query performance: {e}")
+        return {"error": str(e)}
+
+@app.post("/query-performance/clear")
+async def clear_query_metrics():
+    """Clear query performance metrics"""
+    try:
+        from utils.query_monitoring import get_data_privacy_query_monitor
+        monitor = await get_data_privacy_query_monitor()
+        monitor.clear_metrics()
+        return {"message": "Query metrics cleared successfully"}
+    except Exception as e:
+        logger.error(f"Error clearing query metrics: {e}")
+        return {"error": str(e)}
 
 # Graceful shutdown handler
 class GracefulShutdown:

@@ -69,7 +69,14 @@ class PredictionLogger:
             raise
     
     async def _create_predictions_table(self):
-        """Create predictions table for logging"""
+        """Create predictions table for logging with query monitoring"""
+        from utils.query_monitoring import monitor_query
+        
+        async with monitor_query("create_predictions_table", self._create_predictions_table_impl) as result:
+            return result
+    
+    async def _create_predictions_table_impl(self):
+        """Internal implementation of create_predictions_table without monitoring"""
         async with self.pool.acquire() as conn:
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS predictions (
@@ -162,7 +169,14 @@ class PredictionLogger:
                 self.pending_logs.extend(batch)
     
     async def _insert_batch(self, batch: List[PredictionLog]):
-        """Insert batch of predictions to database with encryption for sensitive data"""
+        """Insert batch of predictions to database with encryption for sensitive data and query monitoring"""
+        from utils.query_monitoring import monitor_query
+        
+        async with monitor_query("insert_batch", self._insert_batch_impl, batch) as result:
+            return result
+    
+    async def _insert_batch_impl(self, batch: List[PredictionLog]):
+        """Internal implementation of insert_batch without monitoring"""
         async with self.pool.acquire() as conn:
             # Prepare encrypted data for each log entry
             encrypted_logs = []
@@ -228,7 +242,20 @@ class PredictionLogger:
         end_time: Optional[datetime] = None,
         limit: int = 1000
     ) -> Dict[str, Any]:
-        """Get prediction statistics"""
+        """Get prediction statistics with query monitoring"""
+        from utils.query_monitoring import monitor_query
+        
+        async with monitor_query("get_prediction_stats", self._get_prediction_stats_impl, model_name, start_time, end_time, limit) as result:
+            return result
+    
+    async def _get_prediction_stats_impl(
+        self,
+        model_name: Optional[str] = None,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+        limit: int = 1000
+    ) -> Dict[str, Any]:
+        """Internal implementation of get_prediction_stats without monitoring"""
         try:
             async with self.pool.acquire() as conn:
                 # Build query conditions
