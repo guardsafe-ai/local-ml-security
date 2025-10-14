@@ -406,8 +406,9 @@ class PyTorchModel:
             self.loaded = True
             logger.info(f"✅ [LOADED] PyTorch model: {self.model_name}")
         except Exception as e:
-            from utils.enhanced_logging import log_error_with_context
-            log_error_with_context(
+            from utils.enhanced_logging import get_model_api_logger
+            logger_instance = get_model_api_logger("1.0.0")
+            logger_instance.log_error_with_context(
                 error=e,
                 operation="load_pytorch_model",
                 model_name=self.model_name,
@@ -1737,12 +1738,23 @@ class ModelManager:
         
         ENV = os.getenv("ENVIRONMENT", "development")
         
-        # Enforce version pinning in production
-        if ENV == "production" and (version is None or version == "latest"):
-            raise ValueError(
-                "Model version must be explicitly specified in production. "
-                "Using 'latest' or None is not allowed for safety."
-            )
+        # Enhanced version pinning validation
+        from utils.version_pinning import validate_model_version, get_version_pinning_manager
+        
+        if not validate_model_version(model_name, version or "latest", "load"):
+            manager = get_version_pinning_manager()
+            pinned_version = manager.get_pinned_version(model_name)
+            if pinned_version:
+                raise ValueError(
+                    f"Model {model_name} is pinned to version {pinned_version.version} in {ENV}. "
+                    f"Requested version '{version}' is not allowed. "
+                    f"Pinned by: {pinned_version.pinned_by}, Reason: {pinned_version.reason}"
+                )
+            else:
+                raise ValueError(
+                    f"Model {model_name} is not pinned for {ENV} environment. "
+                    f"Version must be explicitly pinned before access."
+                )
         
         start_time = time.time()
         try:
@@ -2534,6 +2546,31 @@ async def predict(request: PredictionRequest):
             logger.error(f"❌ Input sanitization error: {e}")
             raise HTTPException(status_code=400, detail="Input validation failed")
         
+        # Check for request deduplication
+        from utils.request_deduplication import check_request_duplicate, store_request_response, mark_request_processing
+        
+        # Create request data for deduplication
+        request_data = {
+            "text": sanitized_text,
+            "models": request.models,
+            "ensemble": request.ensemble,
+            "max_length": getattr(request, 'max_length', 512),
+            "temperature": getattr(request, 'temperature', 0.7),
+            "top_p": getattr(request, 'top_p', 0.9),
+            "do_sample": getattr(request, 'do_sample', True)
+        }
+        
+        # Check for duplicate request
+        primary_model = request.models[0] if request.models else "distilbert"
+        cached_response = check_request_duplicate(request_data, primary_model)
+        
+        if cached_response:
+            logger.info(f"✅ [DEDUPLICATION] Returning cached response for duplicate request")
+            return cached_response
+        
+        # Mark request as processing
+        request_hash = mark_request_processing(request_data, primary_model)
+        
         # Log prediction request
         request_id = str(uuid.uuid4())
         logger.info(f"Prediction request: models={request.models}, ensemble={request.ensemble}, text_length={len(sanitized_text)}")
@@ -2618,6 +2655,13 @@ async def predict(request: PredictionRequest):
             
         except Exception as e:
             logger.debug(f"Failed to record business metrics: {e}")
+        
+        # Store response for deduplication
+        try:
+            store_request_response(request_data, primary_model, result)
+            logger.debug(f"💾 [DEDUPLICATION] Stored response for future deduplication")
+        except Exception as e:
+            logger.warning(f"⚠️ [DEDUPLICATION] Failed to store response: {e}")
         
         return result
         
@@ -3494,6 +3538,160 @@ async def reset_all_circuit_breakers():
         return {"message": "All circuit breakers reset successfully"}
     except Exception as e:
         logger.error(f"Error resetting circuit breakers: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
+# VERSION PINNING ENDPOINTS
+# ============================================================================
+
+@app.post("/version-pinning/pin")
+async def pin_model_version(
+    model_name: str,
+    version: str,
+    reason: str,
+    pinned_by: str = "api_user",
+    metadata: Optional[Dict[str, Any]] = None
+):
+    """Pin a model version for production safety"""
+    try:
+        from utils.version_pinning import pin_model_version
+        
+        version_pin = pin_model_version(
+            model_name=model_name,
+            version=version,
+            reason=reason,
+            pinned_by=pinned_by,
+            metadata=metadata or {}
+        )
+        
+        return {
+            "status": "success",
+            "message": f"Model {model_name} v{version} pinned successfully",
+            "pin_info": {
+                "model_name": version_pin.model_name,
+                "version": version_pin.version,
+                "environment": version_pin.environment.value,
+                "pinned_at": version_pin.pinned_at.isoformat(),
+                "pinned_by": version_pin.pinned_by,
+                "reason": version_pin.reason,
+                "checksum": version_pin.checksum
+            }
+        }
+    except Exception as e:
+        logger.error(f"Error pinning model version: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/version-pinning/status")
+async def get_version_pinning_status():
+    """Get version pinning status summary"""
+    try:
+        from utils.version_pinning import get_version_pinning_manager
+        
+        manager = get_version_pinning_manager()
+        summary = manager.get_pinning_summary()
+        
+        return {
+            "status": "success",
+            "summary": summary
+        }
+    except Exception as e:
+        logger.error(f"Error getting version pinning status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/version-pinning/access-log")
+async def get_version_access_log(
+    model_name: Optional[str] = None,
+    limit: int = 100
+):
+    """Get model version access log"""
+    try:
+        from utils.version_pinning import get_version_pinning_manager
+        
+        manager = get_version_pinning_manager()
+        access_log = manager.get_access_log(model_name, limit)
+        
+        return {
+            "status": "success",
+            "access_log": [
+                {
+                    "model_name": access.model_name,
+                    "version": access.version,
+                    "environment": access.environment.value,
+                    "accessed_at": access.accessed_at.isoformat(),
+                    "accessed_by": access.accessed_by,
+                    "operation": access.operation,
+                    "success": access.success,
+                    "error_message": access.error_message
+                }
+                for access in access_log
+            ]
+        }
+    except Exception as e:
+        logger.error(f"Error getting version access log: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/version-pinning/unpin/{model_name}")
+async def unpin_model_version(
+    model_name: str,
+    unpinned_by: str = "api_user"
+):
+    """Unpin a model version (only in development/staging)"""
+    try:
+        from utils.version_pinning import get_version_pinning_manager
+        
+        manager = get_version_pinning_manager()
+        success = manager.unpin_version(model_name, unpinned_by)
+        
+        if success:
+            return {
+                "status": "success",
+                "message": f"Model {model_name} unpinned successfully"
+            }
+        else:
+            return {
+                "status": "error",
+                "message": f"Failed to unpin model {model_name}"
+            }
+    except Exception as e:
+        logger.error(f"Error unpinning model version: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
+# REQUEST DEDUPLICATION ENDPOINTS
+# ============================================================================
+
+@app.get("/deduplication/stats")
+async def get_deduplication_stats():
+    """Get request deduplication statistics"""
+    try:
+        from utils.request_deduplication import get_deduplication_manager
+        
+        manager = get_deduplication_manager()
+        stats = manager.get_cache_stats()
+        
+        return {
+            "status": "success",
+            "stats": stats
+        }
+    except Exception as e:
+        logger.error(f"Error getting deduplication stats: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/deduplication/clear")
+async def clear_deduplication_cache():
+    """Clear request deduplication cache"""
+    try:
+        from utils.request_deduplication import get_deduplication_manager
+        
+        manager = get_deduplication_manager()
+        manager.clear_cache()
+        
+        return {
+            "status": "success",
+            "message": "Deduplication cache cleared successfully"
+        }
+    except Exception as e:
+        logger.error(f"Error clearing deduplication cache: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
