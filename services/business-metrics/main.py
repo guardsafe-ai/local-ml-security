@@ -24,6 +24,8 @@ import sys
 import os
 sys.path.append('/app')
 from tracing_setup import setup_tracing, get_tracer, trace_request, add_span_attributes
+from utils.circuit_breaker import get_database_breaker, get_redis_breaker, get_external_api_breaker
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -153,8 +155,13 @@ class BusinessMetricsService:
                 additional_context={"metric_name": metric.metric_name, "value": metric.value}
             )
     
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type((asyncpg.PostgresError, asyncpg.InterfaceError, asyncpg.ConnectionDoesNotExistError))
+    )
     async def _flush_metrics(self):
-        """Flush metrics buffer to database with transaction management"""
+        """Flush metrics buffer to database with transaction management and retry logic"""
         if not self.metrics_buffer:
             return
         
@@ -407,6 +414,15 @@ app = FastAPI(title="Business Metrics Service", version="1.0.0")
 # Setup distributed tracing
 setup_tracing("business-metrics", app)
 
+# Initialize circuit breakers
+circuit_breakers = {
+    "database": get_database_breaker(),
+    "redis": get_redis_breaker(),
+    "analytics": get_external_api_breaker("analytics"),
+    "model_api": get_external_api_breaker("model_api"),
+    "training": get_external_api_breaker("training")
+}
+
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -572,6 +588,43 @@ class GracefulShutdown:
 # Initialize graceful shutdown
 shutdown_handler = GracefulShutdown(app)
 shutdown_handler.register_handlers()
+
+# Circuit breaker management endpoints
+@app.get("/circuit-breaker/status")
+async def get_circuit_breaker_status():
+    """Get circuit breaker status for business metrics service"""
+    try:
+        states = {}
+        for name, breaker in circuit_breakers.items():
+            states[name] = breaker.get_state()
+        return states
+    except Exception as e:
+        logger.error(f"Error getting circuit breaker status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/circuit-breaker/reset/{breaker_name}")
+async def reset_circuit_breaker(breaker_name: str):
+    """Reset a specific circuit breaker"""
+    try:
+        if breaker_name in circuit_breakers:
+            circuit_breakers[breaker_name].reset()
+            return {"message": f"Circuit breaker '{breaker_name}' reset successfully"}
+        else:
+            raise ValueError(f"Circuit breaker '{breaker_name}' not found")
+    except Exception as e:
+        logger.error(f"Error resetting circuit breaker: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/circuit-breaker/reset-all")
+async def reset_all_circuit_breakers():
+    """Reset all circuit breakers"""
+    try:
+        for breaker in circuit_breakers.values():
+            breaker.reset()
+        return {"message": "All circuit breakers reset successfully"}
+    except Exception as e:
+        logger.error(f"Error resetting circuit breakers: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.on_event("shutdown")
 async def shutdown_event():

@@ -7,7 +7,7 @@ import logging
 import asyncio
 import signal
 from datetime import datetime
-from fastapi import FastAPI, BackgroundTasks
+from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
@@ -27,6 +27,7 @@ from database.connection import db_manager
 from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
 from utils.enhanced_logging import get_analytics_logger, log_analytics_error, log_analytics_event
 from utils.http_client import get_http_client, close_http_client
+from utils.circuit_breaker import get_database_breaker, get_redis_breaker, get_external_api_breaker
 from background_tasks import start_drift_monitoring, stop_drift_monitoring
 
 # Import tracing setup
@@ -214,9 +215,55 @@ class GracefulShutdown:
         
         logger.info("Analytics service graceful shutdown cleanup complete.")
 
+# Initialize circuit breakers
+circuit_breakers = {
+    "database": get_database_breaker(),
+    "redis": get_redis_breaker(),
+    "training": get_external_api_breaker("training"),
+    "model_api": get_external_api_breaker("model_api"),
+    "business_metrics": get_external_api_breaker("business_metrics")
+}
+
 # Initialize graceful shutdown
 shutdown_handler = GracefulShutdown(app)
 shutdown_handler.register_handlers()
+
+# Circuit breaker management endpoints
+@app.get("/circuit-breaker/status")
+async def get_circuit_breaker_status():
+    """Get circuit breaker status for analytics service"""
+    try:
+        states = {}
+        for name, breaker in circuit_breakers.items():
+            states[name] = breaker.get_state()
+        return states
+    except Exception as e:
+        logger.error(f"Error getting circuit breaker status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/circuit-breaker/reset/{breaker_name}")
+async def reset_circuit_breaker(breaker_name: str):
+    """Reset a specific circuit breaker"""
+    try:
+        if breaker_name in circuit_breakers:
+            circuit_breakers[breaker_name].reset()
+            return {"message": f"Circuit breaker '{breaker_name}' reset successfully"}
+        else:
+            raise ValueError(f"Circuit breaker '{breaker_name}' not found")
+    except Exception as e:
+        logger.error(f"Error resetting circuit breaker: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/circuit-breaker/reset-all")
+async def reset_all_circuit_breakers():
+    """Reset all circuit breakers"""
+    try:
+        for breaker in circuit_breakers.values():
+            breaker.reset()
+        return {"message": "All circuit breakers reset successfully"}
+    except Exception as e:
+        logger.error(f"Error resetting circuit breakers: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # Note: Startup event is already defined above
 

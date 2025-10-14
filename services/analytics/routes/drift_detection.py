@@ -388,29 +388,45 @@ async def check_drift_and_retrain(request: CheckAndRetrainRequest):
             model_performance_drift = None
             if request.model_name:
                 try:
-                    # Get predictions from current model
+                    # Get predictions from current model using circuit breaker and retry logic
+                    from utils.circuit_breaker import get_external_api_breaker
+                    from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
                     import httpx
-                    async with httpx.AsyncClient() as client:
-                        # Convert data to text format for model prediction
-                        texts = current_df['text'].tolist() if 'text' in current_df.columns else []
-                        if texts:
-                            # Get predictions from model-api
-                            response = await client.post(
-                                "http://model-api:8000/predict",
-                                json={"text": texts[0], "models": [request.model_name]},  # Test with first text
-                                timeout=30.0
-                            )
-                            if response.status_code == 200:
-                                current_predictions = [response.json()]
-                                
-                                # For now, use the same predictions as reference (in real scenario, would get from different model)
-                                # This is a placeholder - in production, you'd compare with a baseline model
-                                reference_predictions = current_predictions
-                            
-                            # Detect model performance drift
-                            model_performance_drift = drift_detector.detect_model_performance_drift(
-                                old_model_predictions=reference_predictions,
-                                new_model_predictions=current_predictions,
+                    
+                    model_api_breaker = get_external_api_breaker("model_api")
+                    
+                    @retry(
+                        stop=stop_after_attempt(3),
+                        wait=wait_exponential(multiplier=1, min=2, max=10),
+                        retry=retry_if_exception_type((httpx.RequestError, httpx.HTTPStatusError, httpx.TimeoutException))
+                    )
+                    async def _get_predictions():
+                        async with httpx.AsyncClient() as client:
+                            # Convert data to text format for model prediction
+                            texts = current_df['text'].tolist() if 'text' in current_df.columns else []
+                            if texts:
+                                # Get predictions from model-api
+                                response = await client.post(
+                                    "http://model-api:8000/predict",
+                                    json={"text": texts[0], "models": [request.model_name]},  # Test with first text
+                                    timeout=30.0
+                                )
+                                if response.status_code == 200:
+                                    return [response.json()]
+                        return []
+                    
+                    # Use circuit breaker for model API call with retry logic
+                    current_predictions = await model_api_breaker.call(_get_predictions)
+                    
+                    if current_predictions:
+                        # For now, use the same predictions as reference (in real scenario, would get from different model)
+                        # This is a placeholder - in production, you'd compare with a baseline model
+                        reference_predictions = current_predictions
+                        
+                        # Detect model performance drift
+                        model_performance_drift = drift_detector.detect_model_performance_drift(
+                            old_model_predictions=reference_predictions,
+                            new_model_predictions=current_predictions,
                                 ground_truth=None  # No ground truth available in drift detection
                             )
                 except Exception as e:
