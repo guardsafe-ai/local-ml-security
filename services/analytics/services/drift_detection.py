@@ -26,11 +26,15 @@ from sklearn.decomposition import PCA
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import warnings
+from sklearn.exceptions import ConvergenceWarning
 # Targeted warning suppression - only suppress specific warnings that are expected
 warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
 warnings.filterwarnings("ignore", category=FutureWarning, module="sklearn")
 warnings.filterwarnings("ignore", category=ConvergenceWarning, module="sklearn")
 warnings.filterwarnings("ignore", category=RuntimeWarning, module="scipy")
+
+# Initialize logger
+logger = logging.getLogger(__name__)
 logger.debug("🔇 [WARNINGS] Applied targeted warning filters for drift detection")
 
 from .email_notifications import email_service
@@ -1249,44 +1253,76 @@ class DriftDetector:
         )
         
         try:
-            # Call training service to submit retraining job
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.post(
-                    "http://training:8002/queue/submit",
-                    json={
-                        "model_name": model_name,
-                        "training_data_path": training_data_path,
-                        "config": {
-                            "reason": "drift_detected",
-                            "priority": "HIGH",
-                            "drift_info": {
-                                "psi_max": psi_max,
-                                "severe_drift_count": severe_drift_count,
-                                "detection_timestamp": datetime.now().isoformat()
-                            }
-                        }
-                    }
+            # Use transaction for drift detection and retraining operations
+            from database.connection import db_manager
+            
+            async with db_manager.transaction() as conn:
+                # Store drift detection results
+                drift_id = await conn.fetchval(
+                    """
+                    INSERT INTO analytics.drift_detections 
+                    (model_name, drift_score, drift_type, detected_at, details)
+                    VALUES ($1, $2, $3, $4, $5)
+                    RETURNING id
+                    """,
+                    model_name,
+                    psi_max,
+                    "data_drift",
+                    datetime.now(),
+                    json.dumps(drift_results)
                 )
                 
-                if response.status_code == 200:
-                    job_data = response.json()
-                    logger.info(f"✅ Retraining job submitted: {job_data.get('job_id')}")
+                # Call training service to submit retraining job
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    response = await client.post(
+                        "http://training:8002/queue/submit",
+                        json={
+                            "model_name": model_name,
+                            "training_data_path": training_data_path,
+                            "config": {
+                                "reason": "drift_detected",
+                                "priority": "HIGH",
+                                "drift_info": {
+                                    "psi_max": psi_max,
+                                    "severe_drift_count": severe_drift_count,
+                                    "detection_timestamp": datetime.now().isoformat(),
+                                    "drift_id": drift_id
+                                }
+                            }
+                        }
+                    )
                     
-                    return {
-                        "retraining_triggered": True,
-                        "job_id": job_data.get("job_id"),
-                        "psi_max": psi_max,
-                        "severe_drift_count": severe_drift_count,
-                        "timestamp": datetime.now().isoformat()
-                    }
-                else:
-                    logger.error(f"Failed to submit retraining job: {response.text}")
-                    return {
-                        "retraining_triggered": False,
-                        "error": f"Training service returned {response.status_code}",
-                        "psi_max": psi_max,
-                        "severe_drift_count": severe_drift_count
-                    }
+                    if response.status_code == 200:
+                        job_data = response.json()
+                        
+                        # Store retraining job reference
+                        await conn.execute(
+                            """
+                            INSERT INTO analytics.retrain_jobs 
+                            (drift_id, job_id, model_name, status, created_at)
+                            VALUES ($1, $2, $3, $4, $5)
+                            """,
+                            drift_id, job_data.get("job_id"), model_name, "pending", datetime.now()
+                        )
+                        
+                        logger.info(f"✅ Retraining job submitted: {job_data.get('job_id')}")
+                        
+                        return {
+                            "retraining_triggered": True,
+                            "job_id": job_data.get("job_id"),
+                            "drift_id": drift_id,
+                            "psi_max": psi_max,
+                            "severe_drift_count": severe_drift_count,
+                            "timestamp": datetime.now().isoformat()
+                        }
+                    else:
+                        logger.error(f"Failed to submit retraining job: {response.text}")
+                        return {
+                            "retraining_triggered": False,
+                            "error": f"Training service returned {response.status_code}",
+                            "psi_max": psi_max,
+                            "severe_drift_count": severe_drift_count
+                        }
                     
         except Exception as e:
             logger.error(f"Error triggering retraining: {e}")

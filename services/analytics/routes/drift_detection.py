@@ -388,24 +388,24 @@ async def check_drift_and_retrain(request: CheckAndRetrainRequest):
             model_performance_drift = None
             if request.model_name:
                 try:
-                # Get predictions from current model
-                import httpx
-                async with httpx.AsyncClient() as client:
-                    # Convert data to text format for model prediction
-                    texts = current_df['text'].tolist() if 'text' in current_df.columns else []
-                    if texts:
-                        # Get predictions from model-api
-                        response = await client.post(
-                            "http://model-api:8000/predict",
-                            json={"text": texts[0], "models": [request.model_name]},  # Test with first text
-                            timeout=30.0
-                        )
-                        if response.status_code == 200:
-                            current_predictions = [response.json()]
-                            
-                            # For now, use the same predictions as reference (in real scenario, would get from different model)
-                            # This is a placeholder - in production, you'd compare with a baseline model
-                            reference_predictions = current_predictions
+                    # Get predictions from current model
+                    import httpx
+                    async with httpx.AsyncClient() as client:
+                        # Convert data to text format for model prediction
+                        texts = current_df['text'].tolist() if 'text' in current_df.columns else []
+                        if texts:
+                            # Get predictions from model-api
+                            response = await client.post(
+                                "http://model-api:8000/predict",
+                                json={"text": texts[0], "models": [request.model_name]},  # Test with first text
+                                timeout=30.0
+                            )
+                            if response.status_code == 200:
+                                current_predictions = [response.json()]
+                                
+                                # For now, use the same predictions as reference (in real scenario, would get from different model)
+                                # This is a placeholder - in production, you'd compare with a baseline model
+                                reference_predictions = current_predictions
                             
                             # Detect model performance drift
                             model_performance_drift = drift_detector.detect_model_performance_drift(

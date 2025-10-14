@@ -12,11 +12,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional, Any, Tuple
 import warnings
+from sklearn.exceptions import ConvergenceWarning
 # Targeted warning suppression - only suppress specific warnings that are expected
 warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
 warnings.filterwarnings("ignore", category=FutureWarning, module="torch")
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="sklearn")
 warnings.filterwarnings("ignore", category=ConvergenceWarning, module="sklearn")
+
+# Initialize logger
+logger = logging.getLogger(__name__)
 logger.debug("🔇 [WARNINGS] Applied targeted warning filters for ML training")
 
 # Disable MLflow integration in Transformers before importing
@@ -700,13 +704,34 @@ class ModelTrainer:
                 )
                 # Continue without MLflow if it fails
             
-            # Save performance metrics
-            await self.performance_repo.save_performance(
-                base_model_name,
-                "latest",
-                eval_results,
-                training_data_path
-            )
+            # Save performance metrics and model metadata in a transaction
+            async with self.db_manager.transaction() as conn:
+                # Save performance metrics
+                await self.performance_repo.save_performance(
+                    base_model_name,
+                    "latest",
+                    eval_results,
+                    training_data_path
+                )
+                
+                # Update model metadata
+                await conn.execute("""
+                    INSERT INTO training.model_metadata 
+                    (model_name, version, metrics, training_data_path, created_at)
+                    VALUES ($1, $2, $3, $4, $5)
+                    ON CONFLICT (model_name, version) 
+                    DO UPDATE SET 
+                        metrics = EXCLUDED.metrics,
+                        training_data_path = EXCLUDED.training_data_path,
+                        updated_at = CURRENT_TIMESTAMP
+                """, base_model_name, "latest", json.dumps(eval_results), training_data_path, datetime.now())
+                
+                # Update model lineage
+                await conn.execute("""
+                    INSERT INTO training.model_lineage 
+                    (parent_model, child_model, version, created_at)
+                    VALUES ($1, $2, $3, $4)
+                """, model_config["model_name"], base_model_name, "latest", datetime.now())
             
             # Move data from fresh to used folder (data lifecycle management)
             try:
