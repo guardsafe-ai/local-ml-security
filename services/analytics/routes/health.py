@@ -7,10 +7,10 @@ from datetime import datetime
 from models.responses import HealthResponse
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
-router = APIRouter(prefix="/health", tags=["health"])
+router = APIRouter(tags=["health"])
 
 
-@router.get("/", response_model=HealthResponse)
+@router.get("/health", response_model=HealthResponse)
 async def health_check():
     """Health check endpoint"""
     return HealthResponse(
