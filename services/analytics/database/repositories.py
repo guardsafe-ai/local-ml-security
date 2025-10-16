@@ -89,8 +89,8 @@ class RedTeamRepository:
                     AVG(total_attacks) as avg_attacks,
                     AVG(vulnerabilities_found) as avg_vulnerabilities,
                     MAX(test_timestamp) as last_test
-                FROM red_team_tests 
-                WHERE test_timestamp >= NOW() - INTERVAL '%s days'
+                FROM analytics.red_team_tests 
+                WHERE test_timestamp >= NOW() - INTERVAL '1 day' * $1
                 GROUP BY model_name, model_type
                 ORDER BY model_name, model_type
             """, days)
@@ -111,10 +111,10 @@ class RedTeamRepository:
                     AVG(total_attacks) as avg_attacks,
                     AVG(vulnerabilities_found) as avg_vulnerabilities,
                     COUNT(*) as test_count
-                FROM red_team_tests 
+                FROM analytics.red_team_tests 
                 WHERE model_name = $1 
                 AND model_type = 'pre-trained'
-                AND test_timestamp >= NOW() - INTERVAL '%s days'
+                AND test_timestamp >= NOW() - INTERVAL '1 day' * $2
             """, model_name, days)
             
             pretrained_stats = pretrained_results[0] if pretrained_results else None
@@ -126,10 +126,10 @@ class RedTeamRepository:
                     AVG(total_attacks) as avg_attacks,
                     AVG(vulnerabilities_found) as avg_vulnerabilities,
                     COUNT(*) as test_count
-                FROM red_team_tests 
+                FROM analytics.red_team_tests 
                 WHERE model_name = $1 
                 AND model_type = 'trained'
-                AND test_timestamp >= NOW() - INTERVAL '%s days'
+                AND test_timestamp >= NOW() - INTERVAL '1 day' * $2
             """, model_name, days)
             
             trained_stats = trained_results[0] if trained_results else None
@@ -199,8 +199,8 @@ class AnalyticsRepository:
                     model_type,
                     AVG(detection_rate) as avg_detection_rate,
                     COUNT(*) as test_count
-                FROM red_team_tests 
-                WHERE test_timestamp >= NOW() - INTERVAL '%s days'
+                FROM analytics.red_team_tests 
+                WHERE test_timestamp >= NOW() - INTERVAL '1 day' * $1
                 GROUP BY DATE(test_timestamp), model_name, model_type
                 ORDER BY test_date, model_name, model_type
             """, days)

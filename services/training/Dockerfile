@@ -20,12 +20,12 @@ COPY requirements.txt .
 
 # Install PyTorch with automatic CUDA detection
 # This will install CUDA version if available, CPU version otherwise
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121 || \
-    pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+RUN pip install --upgrade pip && \
+    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121 || \
+    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
 
 # Install other requirements
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install -r requirements.txt
 
 # Copy application code
 COPY . .

@@ -1003,6 +1003,21 @@ class ModelTrainer:
         if not job_data:
             return None
         
+        # Parse JSON strings to dictionaries for Pydantic validation
+        result = None
+        if job_data.get("result"):
+            try:
+                result = json.loads(job_data["result"]) if isinstance(job_data["result"], str) else job_data["result"]
+            except (json.JSONDecodeError, TypeError):
+                result = None
+        
+        config = None
+        if job_data.get("config"):
+            try:
+                config = json.loads(job_data["config"]) if isinstance(job_data["config"], str) else job_data["config"]
+            except (json.JSONDecodeError, TypeError):
+                config = None
+        
         return JobStatus(
             job_id=job_data["job_id"],
             model_name=job_data["model_name"],
@@ -1011,20 +1026,37 @@ class ModelTrainer:
             start_time=job_data["start_time"],
             end_time=job_data["end_time"],
             error_message=job_data["error_message"],
-            result=job_data["result"],
+            result=result,
             training_data_path=job_data.get("training_data_path"),
             learning_rate=job_data.get("learning_rate"),
             batch_size=job_data.get("batch_size"),
             num_epochs=job_data.get("num_epochs"),
             max_length=job_data.get("max_length"),
-            config=job_data.get("config")
+            config=config
         )
 
     async def list_jobs(self) -> List[JobStatus]:
         """List all training jobs"""
         jobs_data = await self.job_repo.list_jobs()
-        return [
-            JobStatus(
+        jobs = []
+        
+        for job in jobs_data:
+            # Parse JSON strings to dictionaries for Pydantic validation
+            result = None
+            if job.get("result"):
+                try:
+                    result = json.loads(job["result"]) if isinstance(job["result"], str) else job["result"]
+                except (json.JSONDecodeError, TypeError):
+                    result = None
+            
+            config = None
+            if job.get("config"):
+                try:
+                    config = json.loads(job["config"]) if isinstance(job["config"], str) else job["config"]
+                except (json.JSONDecodeError, TypeError):
+                    config = None
+            
+            jobs.append(JobStatus(
                 job_id=job["job_id"],
                 model_name=job["model_name"],
                 status=job["status"],
@@ -1032,13 +1064,13 @@ class ModelTrainer:
                 start_time=job["start_time"],
                 end_time=job["end_time"],
                 error_message=job["error_message"],
-                result=job["result"],
+                result=result,
                 training_data_path=job.get("training_data_path"),
                 learning_rate=job.get("learning_rate"),
                 batch_size=job.get("batch_size"),
                 num_epochs=job.get("num_epochs"),
                 max_length=job.get("max_length"),
-                config=job.get("config")
-            )
-            for job in jobs_data
-        ]
+                config=config
+            ))
+        
+        return jobs

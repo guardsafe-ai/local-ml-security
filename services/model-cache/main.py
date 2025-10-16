@@ -18,6 +18,7 @@ import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import threading
 from concurrent.futures import ThreadPoolExecutor
+import redis
 from collections import OrderedDict
 import psutil
 import os

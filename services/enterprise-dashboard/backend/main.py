@@ -131,8 +131,9 @@ app.include_router(data_privacy_router, prefix="/data-privacy", tags=["Data Priv
 app.include_router(mlflow_router, prefix="/mlflow", tags=["MLflow"])
 app.include_router(monitoring_router, prefix="/monitoring", tags=["Monitoring"])
 
-# Include WebSocket router
-app.include_router(websocket_router, tags=["WebSocket"])
+# Include WebSocket router if enabled
+if config["enable_websocket"]:
+    app.include_router(websocket_router, tags=["WebSocket"])
 
 # Global exception handlers
 from fastapi import Request

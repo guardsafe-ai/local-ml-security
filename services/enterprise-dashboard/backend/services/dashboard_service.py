@@ -18,90 +18,21 @@ class DashboardService:
     
     def __init__(self):
         self.api_client = APIClient()
-        self._cache = {}
-        self._cache_ttl = 5  # 5 seconds cache TTL
-        self._circuit_breaker_threshold = 3
-        self._circuit_breaker_timeout = 30
-        self._service_failures = {}
-
-    def _is_circuit_breaker_open(self, service_name: str) -> bool:
-        """Check if circuit breaker is open for a service"""
-        if service_name not in self._service_failures:
-            return False
-        
-        failure_count, last_failure = self._service_failures[service_name]
-        if failure_count >= self._circuit_breaker_threshold:
-            if datetime.now() - last_failure < timedelta(seconds=self._circuit_breaker_timeout):
-                return True
-            else:
-                # Reset circuit breaker after timeout
-                del self._service_failures[service_name]
-        return False
-
-    def _record_service_failure(self, service_name: str):
-        """Record a service failure for circuit breaker"""
-        now = datetime.now()
-        if service_name in self._service_failures:
-            self._service_failures[service_name] = (
-                self._service_failures[service_name][0] + 1,
-                now
-            )
-        else:
-            self._service_failures[service_name] = (1, now)
-
-    def _record_service_success(self, service_name: str):
-        """Record a service success, reset circuit breaker"""
-        if service_name in self._service_failures:
-            del self._service_failures[service_name]
-
-    def _get_cached_data(self, key: str) -> Optional[Any]:
-        """Get cached data if not expired"""
-        if key in self._cache:
-            data, timestamp = self._cache[key]
-            if datetime.now() - timestamp < timedelta(seconds=self._cache_ttl):
-                return data
-            else:
-                del self._cache[key]
-        return None
-
-    def _set_cached_data(self, key: str, data: Any):
-        """Cache data with timestamp"""
-        self._cache[key] = (data, datetime.now())
-
-    async def _safe_service_call(self, service_name: str, callable_func, fallback_value=None):
-        """Safely call a service with circuit breaker and error handling"""
-        if self._is_circuit_breaker_open(service_name):
-            logger.warning(f"Circuit breaker open for {service_name}, using fallback")
-            return fallback_value
-
-        try:
-            result = await callable_func()
-            self._record_service_success(service_name)
-            return result
-        except Exception as e:
-            logger.error(f"Service {service_name} failed: {e}")
-            self._record_service_failure(service_name)
-            return fallback_value
 
     async def get_dashboard_metrics(self) -> DashboardMetrics:
-        """Get comprehensive dashboard metrics with circuit breaker and caching"""
-        cache_key = "dashboard_metrics"
-        cached_data = self._get_cached_data(cache_key)
-        if cached_data:
-            return cached_data
-
+        """Get comprehensive dashboard metrics"""
         try:
-            # Get data from all services in parallel with circuit breaker protection
+            # Get data from all services in parallel
             tasks = [
-                self._safe_service_call("models", self.api_client.get_available_models, {"models": {}, "available_models": [], "mlflow_models": []}),
-                self._safe_service_call("training", self.api_client.get_training_jobs, []),
-                self._safe_service_call("red_team", self.api_client.get_red_team_results, []),
-                self._safe_service_call("analytics", self.api_client.get_analytics_summary, {"summary": {}})
+                self.api_client.get_available_models(),
+                self.api_client.get_training_jobs(),
+                self.api_client.get_red_team_results(),
+                self.api_client.get_analytics_summary()
             ]
             
             models_data, training_jobs, red_team_results, analytics_summary = await asyncio.gather(*tasks)
             
-            # Calculate metrics with safe defaults
+            # Calculate metrics
             total_models = len(models_data.get("models", {}))
             active_jobs = len([job for job in training_jobs if job.get("status") in ["running", "pending"]])
             total_attacks = len(red_team_results)
@@ -113,15 +44,15 @@ class DashboardService:
                 if summary and "detection_rate" in summary:
                     detection_rate = summary["detection_rate"]
             
-            # Calculate system health with circuit breaker protection
-            health_status = await self._safe_service_call("health", self.api_client.get_all_services_health, [])
+            # Calculate system health (simplified) - optimize with generator expression
+            health_status = await self.api_client.get_all_services_health()
             if health_status:
                 healthy_services = sum(1 for service in health_status if service.get("status") == "healthy")
                 system_health = (healthy_services / len(health_status)) * 100
             else:
                 system_health = 0.0
             
-            result = DashboardMetrics(
+            return DashboardMetrics(
                 total_models=total_models,
                 active_jobs=active_jobs,
                 total_attacks=total_attacks,
@@ -129,10 +60,6 @@ class DashboardService:
                 system_health=system_health,
                 last_updated=datetime.now()
             )
-            
-            # Cache the result
-            self._set_cached_data(cache_key, result)
-            return result
             
         except Exception as e:
             logger.error(f"Failed to get dashboard metrics: {e}")

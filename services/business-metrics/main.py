@@ -427,6 +427,11 @@ app = FastAPI(title="Business Metrics Service", version="1.0.0")
 # Setup distributed tracing
 setup_tracing("business-metrics", app)
 
+# Include routers
+from routes import health, kpis
+app.include_router(health.router, prefix="/api/v1", tags=["health"])
+app.include_router(kpis.router, prefix="/api/v1", tags=["kpis"])
+
 # Initialize circuit breakers
 circuit_breakers = {
     "database": get_database_breaker(),
