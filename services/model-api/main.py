@@ -316,17 +316,22 @@ class PyTorchModel:
         self.quantized = False
         self.model_source = "Unknown"  # Will be set when model is loaded
         self.model_version = "Unknown"  # Will be set when model is loaded
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.size_mb = 0.0  # Model size in MB
+        self.memory_usage_mb = 0.0  # Memory usage in MB
     
     def load(self):
         """Load the model and tokenizer"""
         try:
+            import torch  # Import torch at the beginning of the method
+            from transformers import AutoTokenizer, AutoModelForSequenceClassification
+            
             # Check if this is an MLflow model URI
             if self.model_path.startswith("models:/"):
                 logger.info(f"🔄 [MLFLOW] Loading MLflow model: {self.model_path}")
                 import mlflow
                 import tempfile
                 import os
-                import torch
                 
                 # Download model from MLflow
                 with tempfile.TemporaryDirectory() as temp_dir:
@@ -394,6 +399,14 @@ class PyTorchModel:
             
             self.model.eval()
             
+            # Set model source and version
+            if self.model_path.startswith("models:/"):
+                self.model_source = "MLflow"
+                self.model_version = "trained"
+            else:
+                self.model_source = "Hugging Face"
+                self.model_version = "pre-trained"
+            
             # Auto-quantize model for 4x inference speedup
             try:
                 logger.info(f"🔧 [QUANTIZATION] Auto-quantizing {self.model_name} for faster inference...")
@@ -403,16 +416,19 @@ class PyTorchModel:
                 logger.warning(f"⚠️ [QUANTIZATION] Failed to quantize {self.model_name}: {e}")
                 # Continue without quantization if it fails
             
+            # Calculate model size and memory usage
+            self.size_mb = self._calculate_model_size()
+            self.memory_usage_mb = self._calculate_memory_usage()
+            
             self.loaded = True
-            logger.info(f"✅ [LOADED] PyTorch model: {self.model_name}")
+            logger.info(f"✅ [LOADED] PyTorch model: {self.model_name} (Size: {self.size_mb:.1f}MB, Memory: {self.memory_usage_mb:.1f}MB)")
         except Exception as e:
             from utils.enhanced_logging import get_model_api_logger
             logger_instance = get_model_api_logger("1.0.0")
             logger_instance.log_error_with_context(
                 error=e,
                 operation="load_pytorch_model",
-                model_name=self.model_name,
-                additional_context={"model_type": "pytorch", "device": str(self.device)}
+                additional_data={"model_name": self.model_name, "model_type": "pytorch", "device": str(self.device)}
             )
             self.loaded = False
     
@@ -632,6 +648,55 @@ class PyTorchModel:
         except Exception as e:
             logger.error(f"Error getting model insights for {self.model_name}: {e}")
             return {"error": str(e)}
+    
+    def _calculate_model_size(self) -> float:
+        """Calculate model size in MB"""
+        try:
+            if self.model is None:
+                return 0.0
+            
+            # Calculate size using the existing get_model_size_gb function
+            size_gb = get_model_size_gb(self.model_path, self.model_source, True, self.model_name)
+            if size_gb is not None:
+                return size_gb * 1024  # Convert GB to MB
+            else:
+                # Fallback: estimate based on model path
+                if "distilbert" in self.model_path.lower():
+                    return 250.0  # ~250MB
+                elif "bert-base" in self.model_path.lower():
+                    return 400.0  # ~400MB
+                elif "roberta" in self.model_path.lower():
+                    return 500.0  # ~500MB
+                elif "deberta" in self.model_path.lower():
+                    return 600.0  # ~600MB
+                else:
+                    return 300.0  # Default estimate
+        except Exception as e:
+            logger.warning(f"Could not calculate model size for {self.model_name}: {e}")
+            return 0.0
+    
+    def _calculate_memory_usage(self) -> float:
+        """Calculate current memory usage in MB"""
+        try:
+            if self.model is None:
+                return 0.0
+            
+            # Get model parameters count
+            total_params = sum(p.numel() for p in self.model.parameters())
+            
+            # Estimate memory usage (4 bytes per parameter for float32)
+            memory_bytes = total_params * 4
+            
+            # Convert to MB
+            memory_mb = memory_bytes / (1024 * 1024)
+            
+            # Add some overhead for activations and other tensors
+            memory_mb *= 1.5
+            
+            return memory_mb
+        except Exception as e:
+            logger.warning(f"Could not calculate memory usage for {self.model_name}: {e}")
+            return 0.0
 
 class SklearnModel:
     """Wrapper for scikit-learn models"""
@@ -812,11 +877,6 @@ class ModelManager:
     async def _mlflow_operation(self, operation: Callable, *args, **kwargs):
         """Execute MLflow operation with circuit breaker protection"""
         return await self._circuit_breakers["mlflow"].call(operation, *args, **kwargs)
-        
-        # Models will be loaded on-demand when needed
-        # self._load_models()
-        
-        # Preloading will be started in the FastAPI startup event
     
     def update_progress(self, model_name: str, status: str, progress: int = 0, message: str = "", details: dict = None):
         """Update loading progress for a model with detailed ML pipeline information"""
@@ -1386,10 +1446,10 @@ class ModelManager:
                 self.enhanced_logger.log_error_with_context(
                     error=e,
                     operation=f"predict_single_{model_name}",
-                    service_name="model-api",
-                    request_id=request_id,
-                    model_name=model_name,
-                    additional_context={
+                    additional_data={
+                        "service_name": "model-api",
+                        "request_id": request_id,
+                        "model_name": model_name,
                         "text_length": len(text),
                         "processing_time_ms": processing_time_ms,
                         "model_loaded": model.loaded if model else False
@@ -1411,10 +1471,10 @@ class ModelManager:
             self.enhanced_logger.log_error_with_context(
                 error=e,
                 operation=f"predict_single_{model_name}",
-                service_name="model-api",
-                request_id=request_id,
-                model_name=model_name,
-                additional_context={
+                additional_data={
+                    "service_name": "model-api",
+                    "request_id": request_id,
+                    "model_name": model_name,
                     "text_length": len(text),
                     "processing_time_ms": processing_time_ms,
                     "validation_failed": True
@@ -2069,6 +2129,12 @@ class ModelManager:
         except Exception as e:
             logger.error(f"Error loading trained model {model_name}: {e}")
             return None
+    
+    def initialize_models(self):
+        """Initialize all models at startup"""
+        logger.info("🔄 [INIT] Loading all models at startup...")
+        self._load_models()
+        logger.info("✅ [INIT] Model loading completed")
 
 # FastAPI application
 app = FastAPI(title="Model API Service", version="1.0.0")
@@ -2152,7 +2218,55 @@ batch_config = BatchConfig(
 )
 
 async def batch_inference_function(texts: List[str], batch_requests: List) -> List[Dict[str, Any]]:
-    """Inference function for dynamic batching"""
+    """Inference function for dynamic batching - processes multiple requests efficiently"""
+    try:
+        logger.info(f"🔄 [BATCH] Processing {len(texts)} texts in parallel")
+        
+        # Process all requests in parallel using asyncio.gather
+        tasks = []
+        for i, text in enumerate(texts):
+            req = batch_requests[i] if i < len(batch_requests) else {}
+            models = req.metadata.get("models", []) if req.metadata else []
+            ensemble = req.metadata.get("ensemble", False) if req.metadata else False
+            start_time = req.metadata.get("start_time", time.time()) if req.metadata else time.time()
+            
+            # Create task for individual prediction
+            task = _execute_prediction(text, models, ensemble, start_time, True)
+            tasks.append(task)
+        
+        # Execute all predictions in parallel
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Process results and handle any exceptions
+        processed_results = []
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.error(f"❌ [BATCH] Error processing text {i}: {result}")
+                processed_results.append({
+                    "text": texts[i],
+                    "prediction": "error",
+                    "confidence": 0.0,
+                    "error": str(result),
+                    "probabilities": {},
+                    "model_predictions": {},
+                    "ensemble_used": False,
+                    "processing_time_ms": 0,
+                    "from_cache": False,
+                    "timestamp": time.time()
+                })
+            else:
+                processed_results.append(result)
+        
+        logger.info(f"✅ [BATCH] Processed {len(processed_results)} predictions in parallel")
+        return processed_results
+                
+    except Exception as e:
+        logger.error(f"❌ [BATCH] Batch inference failed: {e}")
+        # Fallback to individual predictions
+        return await _fallback_individual_predictions(texts, batch_requests)
+
+async def _fallback_individual_predictions(texts: List[str], batch_requests: List) -> List[Dict[str, Any]]:
+    """Fallback to individual predictions if batch fails"""
     results = []
     
     for i, text in enumerate(texts):
@@ -2167,11 +2281,18 @@ async def batch_inference_function(texts: List[str], batch_requests: List) -> Li
             results.append(result)
             
         except Exception as e:
-            logger.error(f"❌ [BATCH] Error processing text {i}: {e}")
+            logger.error(f"❌ [BATCH FALLBACK] Error processing text {i}: {e}")
             results.append({
+                "text": text,
                 "prediction": "error",
                 "confidence": 0.0,
-                "error": str(e)
+                "error": str(e),
+                "probabilities": {},
+                "model_predictions": {},
+                "ensemble_used": False,
+                "processing_time_ms": 0,
+                "from_cache": False,
+                "timestamp": time.time()
             })
     
     return results
@@ -2202,6 +2323,10 @@ async def startup_event():
     except Exception as e:
         logger.error(f"❌ Failed to initialize HTTP client: {e}")
     
+    # Models will be loaded on-demand via Model Cache Service
+    # No preloading in Model API - delegate to Model Cache
+    logger.info("✅ Model API ready - models will be loaded on-demand via Model Cache")
+    
     # Initialize prediction logger
     try:
         await prediction_logger.initialize()
@@ -2209,12 +2334,8 @@ async def startup_event():
     except Exception as e:
         logger.error(f"❌ Failed to initialize prediction logger: {e}")
     
-    # Start background model preloading
-    try:
-        asyncio.create_task(model_manager._start_preloading())
-        logger.info("🔄 Model preloading started in background")
-    except Exception as e:
-        logger.error(f"❌ Failed to start model preloading: {e}")
+    # Model preloading handled by Model Cache Service
+    logger.info("🔄 Model preloading delegated to Model Cache Service")
     
     # Note: Service info will be updated later with comprehensive metrics
     
@@ -2366,23 +2487,23 @@ async def list_models():
                 trained_loaded = trained_name in model_manager.models
                 
                 # Get model info
-                pretrained_info = model_manager.models.get(pretrained_name, {})
-                trained_info = model_manager.models.get(trained_name, {})
+                pretrained_model = model_manager.models.get(pretrained_name)
+                trained_model = model_manager.models.get(trained_name)
                 
                 models[base_model_name] = {
                     "pretrained": {
                         "name": pretrained_name,
                         "loaded": pretrained_loaded,
-                        "version": pretrained_info.get("version", "unknown"),
-                        "size_mb": pretrained_info.get("size_mb", 0),
-                        "memory_usage_mb": pretrained_info.get("memory_usage_mb", 0)
+                        "version": getattr(pretrained_model, 'model_version', 'unknown') if pretrained_model else 'unknown',
+                        "size_mb": getattr(pretrained_model, 'size_mb', 0) if pretrained_model else 0,
+                        "memory_usage_mb": getattr(pretrained_model, 'memory_usage_mb', 0) if pretrained_model else 0
                     },
                     "trained": {
                         "name": trained_name,
                         "loaded": trained_loaded,
-                        "version": trained_info.get("version", "unknown"),
-                        "size_mb": trained_info.get("size_mb", 0),
-                        "memory_usage_mb": trained_info.get("memory_usage_mb", 0)
+                        "version": getattr(trained_model, 'model_version', 'unknown') if trained_model else 'unknown',
+                        "size_mb": getattr(trained_model, 'size_mb', 0) if trained_model else 0,
+                        "memory_usage_mb": getattr(trained_model, 'memory_usage_mb', 0) if trained_model else 0
                     }
                 }
             except Exception as e:
@@ -2607,8 +2728,9 @@ async def predict(request: PredictionRequest):
         except Exception as e:
             logger.debug(f"Failed to record sanitization metrics: {e}")
         
-        # Use dynamic batching for better throughput
+        # Use dynamic batching for optimal ML inference performance
         try:
+            logger.info(f"🔄 [DYNAMIC BATCH] Adding request to batch queue")
             result = await dynamic_batcher.add_request(
                 text=sanitized_text,
                 request_id=f"req_{int(time.time() * 1000)}",
@@ -2618,9 +2740,10 @@ async def predict(request: PredictionRequest):
                     "start_time": start_time
                 }
             )
+            logger.info(f"✅ [DYNAMIC BATCH] Got result from batch processing")
         except Exception as e:
             logger.warning(f"⚠️ Dynamic batching failed, falling back to direct prediction: {e}")
-            # Fallback to direct prediction
+            # Fallback to direct prediction with intelligent routing
             prediction_timeout = 30  # 30 seconds timeout
             result = await asyncio.wait_for(
                 _execute_prediction(sanitized_text, request.models, request.ensemble, start_time, request.return_probabilities),
@@ -2662,6 +2785,11 @@ async def predict(request: PredictionRequest):
             logger.debug(f"💾 [DEDUPLICATION] Stored response for future deduplication")
         except Exception as e:
             logger.warning(f"⚠️ [DEDUPLICATION] Failed to store response: {e}")
+        
+        # Debug: Log result structure
+        logger.info(f"🔍 [DEBUG] Result type: {type(result)}")
+        logger.info(f"🔍 [DEBUG] Result keys: {list(result.keys()) if isinstance(result, dict) else 'Not a dict'}")
+        logger.info(f"🔍 [DEBUG] Result: {result}")
         
         return result
         
@@ -2853,28 +2981,22 @@ async def _execute_prediction(text: str, models: List[str], ensemble: bool, star
                 model_name = available_models[0]
                 logger.info(f"🎯 [AUTO SELECT] Using best available model: {model_name}")
         else:
-            # Use best available model
-            available_models = model_manager.get_available_models()
-            if not available_models:
-                raise HTTPException(status_code=503, detail="No models available")
-            model_name = available_models[0]
-            logger.info(f"🎯 [AUTO SELECT] Using best available model: {model_name}")
+            # No specific models requested - use Model Cache Service with default model
+            logger.info(f"🎯 [AUTO SELECT] No models specified, using Model Cache Service with default model")
             
-            # Get model info for logging
-            if model_name in model_manager.models:
-                model_info = model_manager.models[model_name]
-                logger.info(f"📊 [MODEL INFO] Model: {model_name}")
-                logger.info(f"📍 [MODEL PATH] Path: {getattr(model_info, 'model_path', 'Unknown')}")
-                logger.info(f"🏷️ [MODEL SOURCE] Source: {getattr(model_info, 'model_source', 'Unknown')}")
-                logger.info(f"📈 [MODEL VERSION] Version: {getattr(model_info, 'model_version', 'Unknown')}")
-                logger.info(f"✅ [MODEL LOADED] Loaded: {getattr(model_info, 'loaded', False)}")
-            
-            logger.info(f"🔮 [PREDICTING] Making prediction with {model_name}...")
-            result = model_manager.predict_single(text=text, model_name=model_name)
-            # Create a copy of result to avoid circular reference
-            result_copy = result.copy()
-            result["model_predictions"] = {model_name: result_copy}
-            result["ensemble_used"] = False
+            # Try Model Cache Service with default model (distilbert)
+            cache_result = await model_manager._predict_with_cache(text, ["distilbert"])
+            if cache_result:
+                result = cache_result
+                logger.info(f"✅ [CACHE HIT] Got prediction from Model Cache Service")
+            else:
+                # Fallback: try with any available model from cache
+                cache_result = await model_manager._predict_with_cache(text, [])
+                if cache_result:
+                    result = cache_result
+                    logger.info(f"✅ [CACHE FALLBACK] Got prediction from Model Cache Service")
+                else:
+                    raise HTTPException(status_code=503, detail="No models available in Model Cache Service")
             
             logger.info(f"✅ [PREDICTION RESULT] Prediction: {result.get('prediction', 'Unknown')}")
             logger.info(f"📊 [CONFIDENCE] Confidence: {result.get('confidence', 0.0)}")

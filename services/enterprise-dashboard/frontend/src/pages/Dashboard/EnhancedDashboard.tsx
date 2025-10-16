@@ -42,6 +42,10 @@ import { useWebSocket } from '../../services/websocketService';
 import { apiService } from '../../services/apiService';
 import RealTimeMetrics from '../../components/Dashboard/RealTimeMetrics';
 import InsightsDashboard from '../../components/Dashboard/InsightsDashboard';
+import ServiceHealthCard from '../../components/Dashboard/ServiceHealthCard';
+import SystemMetricsGrid from '../../components/Dashboard/SystemMetricsGrid';
+import ActivityTimeline from '../../components/Dashboard/ActivityTimeline';
+import QuickActionsPanel from '../../components/Dashboard/QuickActionsPanel';
 import LoadingSkeleton from '../../components/common/LoadingSkeleton/LoadingSkeleton';
 import ErrorBoundary from '../../components/common/ErrorBoundary/ErrorBoundary';
 
@@ -71,18 +75,32 @@ const EnhancedDashboard: React.FC = () => {
   const [snackbar, setSnackbar] = useState({ open: false, message: '', severity: 'info' as 'success' | 'error' | 'warning' | 'info' });
   const { isConnected, lastMessage } = useWebSocket();
 
-  // Fetch comprehensive metrics
+  // Fetch dashboard metrics
   const { data: metrics, isLoading: metricsLoading, error: metricsError, refetch: refetchMetrics } = useQuery({
     queryKey: ['dashboard-metrics'],
-    queryFn: () => apiService.getComprehensiveMetrics(),
+    queryFn: () => apiService.getDashboardMetrics(),
     refetchInterval: 30000, // Refresh every 30 seconds
   });
 
-  // Fetch real-time status
-  const { data: realTimeStatus, isLoading: statusLoading } = useQuery({
-    queryKey: ['real-time-status'],
-    queryFn: () => apiService.getRealTimeStatus(),
+  // Fetch services health
+  const { data: servicesHealth, isLoading: healthLoading, refetch: refetchHealth } = useQuery({
+    queryKey: ['services-health'],
+    queryFn: () => apiService.getServicesHealth(),
     refetchInterval: 10000, // Refresh every 10 seconds
+  });
+
+  // Fetch real-time metrics
+  const { data: realTimeMetrics, isLoading: realTimeLoading, refetch: refetchRealTime } = useQuery({
+    queryKey: ['real-time-metrics'],
+    queryFn: () => apiService.getRealTimeMetrics(),
+    refetchInterval: 5000, // Refresh every 5 seconds
+  });
+
+  // Fetch recent activity
+  const { data: recentActivity, isLoading: activityLoading, refetch: refetchActivity } = useQuery({
+    queryKey: ['recent-activity'],
+    queryFn: () => apiService.getRecentActivity(),
+    refetchInterval: 15000, // Refresh every 15 seconds
   });
 
   // Handle WebSocket messages
@@ -91,6 +109,7 @@ const EnhancedDashboard: React.FC = () => {
       switch (lastMessage.type) {
         case 'metrics_update':
           refetchMetrics();
+          refetchRealTime();
           break;
         case 'alert':
           setSnackbar({
@@ -100,11 +119,14 @@ const EnhancedDashboard: React.FC = () => {
           });
           break;
         case 'system_status':
-          // Handle system status updates
+          refetchHealth();
+          break;
+        case 'activity_update':
+          refetchActivity();
           break;
       }
     }
-  }, [lastMessage, refetchMetrics]);
+  }, [lastMessage, refetchMetrics, refetchRealTime, refetchHealth, refetchActivity]);
 
   const handleTabChange = (event: React.SyntheticEvent, newValue: number) => {
     setActiveTab(newValue);
@@ -112,6 +134,46 @@ const EnhancedDashboard: React.FC = () => {
 
   const handleRefresh = () => {
     refetchMetrics();
+    refetchHealth();
+    refetchRealTime();
+    refetchActivity();
+  };
+
+  const handleQuickAction = (actionId: string) => {
+    console.log('Quick action triggered:', actionId);
+    // Handle different quick actions
+    switch (actionId) {
+      case 'run_security_scan':
+        setSnackbar({
+          open: true,
+          message: 'Security scan started',
+          severity: 'info',
+        });
+        break;
+      case 'start_training':
+        setSnackbar({
+          open: true,
+          message: 'Training job initiated',
+          severity: 'info',
+        });
+        break;
+      case 'generate_report':
+        setSnackbar({
+          open: true,
+          message: 'Report generation started',
+          severity: 'info',
+        });
+        break;
+      case 'refresh_data':
+        handleRefresh();
+        break;
+      default:
+        setSnackbar({
+          open: true,
+          message: `Action ${actionId} executed`,
+          severity: 'info',
+        });
+    }
   };
 
   const getStatusColor = (status: string) => {
@@ -150,14 +212,19 @@ const EnhancedDashboard: React.FC = () => {
     }
   };
 
-  if (metricsLoading) {
+  const isLoading = metricsLoading || healthLoading || realTimeLoading || activityLoading;
+  const hasError = metricsError || healthLoading === false && !servicesHealth;
+
+  if (isLoading && !metrics) {
     return <LoadingSkeleton lines={8} />;
   }
 
-  if (metricsError) {
+  if (hasError) {
     return (
       <Alert severity="error" sx={{ m: 2 }}>
-        Failed to load dashboard metrics. Please try again.
+        Failed to load dashboard data. Please try again.
+        <br />
+        <button onClick={handleRefresh}>Retry</button>
       </Alert>
     );
   }
@@ -213,163 +280,60 @@ const EnhancedDashboard: React.FC = () => {
         <TabPanel value={activeTab} index={0}>
           {/* Overview Tab */}
           <Grid container spacing={3}>
-            {/* System Status Cards */}
-            <Grid item xs={12} md={6} lg={3}>
-              <Card>
-                <CardContent>
-                  <Box sx={{ display: 'flex', alignItems: 'center', mb: 2 }}>
-                    <Monitor color="primary" sx={{ mr: 1 }} />
-                    <Typography variant="h6">System Status</Typography>
-                  </Box>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                    {getStatusIcon(realTimeStatus?.system?.status || 'unknown')}
-                    <Typography variant="body2">
-                      {realTimeStatus?.system?.status || 'Unknown'}
-                    </Typography>
-                  </Box>
-                  <LinearProgress
-                    variant="determinate"
-                    value={realTimeStatus?.system?.uptime || 0}
-                    sx={{ mt: 1 }}
-                  />
-                  <Typography variant="caption" color="text.secondary">
-                    Uptime: {realTimeStatus?.system?.uptime || 0}%
-                  </Typography>
-                </CardContent>
-              </Card>
+            {/* System Metrics Grid */}
+            <Grid item xs={12}>
+              <SystemMetricsGrid
+                metrics={metrics || {
+                  total_models: 0,
+                  active_jobs: 0,
+                  total_attacks: 0,
+                  detection_rate: 0,
+                  system_health: 0
+                }}
+                onRefresh={handleRefresh}
+                loading={isLoading}
+              />
             </Grid>
 
-            <Grid item xs={12} md={6} lg={3}>
-              <Card>
-                <CardContent>
-                  <Box sx={{ display: 'flex', alignItems: 'center', mb: 2 }}>
-                    <Security color="primary" sx={{ mr: 1 }} />
-                    <Typography variant="h6">Security Status</Typography>
-                  </Box>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                    {getStatusIcon(realTimeStatus?.security?.status || 'unknown')}
-                    <Typography variant="body2">
-                      {realTimeStatus?.security?.status || 'Unknown'}
+            {/* Services Health Cards */}
+            <Grid item xs={12}>
+              <Typography variant="h6" gutterBottom>
+                Services Health
+              </Typography>
+              <Grid container spacing={2}>
+                {servicesHealth?.map((service: any, index: number) => (
+                  <Grid item xs={12} sm={6} md={4} lg={2.4} key={index}>
+                    <ServiceHealthCard
+                      service={service}
+                      onRefresh={handleRefresh}
+                      loading={isLoading}
+                    />
+                  </Grid>
+                )) || (
+                  <Grid item xs={12}>
+                    <Typography variant="body2" color="text.secondary">
+                      No service health data available
                     </Typography>
-                  </Box>
-                  <Typography variant="h4" color="primary" sx={{ mt: 1 }}>
-                    {metrics?.security?.threats_blocked || 0}
-                  </Typography>
-                  <Typography variant="caption" color="text.secondary">
-                    Threats Blocked
-                  </Typography>
-                </CardContent>
-              </Card>
+                  </Grid>
+                )}
+              </Grid>
             </Grid>
 
-            <Grid item xs={12} md={6} lg={3}>
-              <Card>
-                <CardContent>
-                  <Box sx={{ display: 'flex', alignItems: 'center', mb: 2 }}>
-                    <Analytics color="primary" sx={{ mr: 1 }} />
-                    <Typography variant="h6">Model Performance</Typography>
-                  </Box>
-                  <Typography variant="h4" color="primary">
-                    {metrics?.models?.average_accuracy || 0}%
-                  </Typography>
-                  <Typography variant="caption" color="text.secondary">
-                    Average Accuracy
-                  </Typography>
-                  <Box sx={{ display: 'flex', alignItems: 'center', mt: 1 }}>
-                    <TrendingUp color="success" sx={{ mr: 0.5 }} />
-                    <Typography variant="body2" color="success.main">
-                      +2.3% from last week
-                    </Typography>
-                  </Box>
-                </CardContent>
-              </Card>
-            </Grid>
-
-            <Grid item xs={12} md={6} lg={3}>
-              <Card>
-                <CardContent>
-                  <Box sx={{ display: 'flex', alignItems: 'center', mb: 2 }}>
-                    <Business color="primary" sx={{ mr: 1 }} />
-                    <Typography variant="h6">Business Metrics</Typography>
-                  </Box>
-                  <Typography variant="h4" color="primary">
-                    ${metrics?.business?.cost_savings || 0}
-                  </Typography>
-                  <Typography variant="caption" color="text.secondary">
-                    Cost Savings
-                  </Typography>
-                  <Box sx={{ display: 'flex', alignItems: 'center', mt: 1 }}>
-                    <TrendingUp color="success" sx={{ mr: 0.5 }} />
-                    <Typography variant="body2" color="success.main">
-                      +15% this month
-                    </Typography>
-                  </Box>
-                </CardContent>
-              </Card>
-            </Grid>
-
-            {/* Recent Activity */}
+            {/* Recent Activity and Quick Actions */}
             <Grid item xs={12} md={8}>
-              <Card>
-                <CardContent>
-                  <Typography variant="h6" gutterBottom>
-                    Recent Activity
-                  </Typography>
-                  <Box sx={{ maxHeight: 300, overflow: 'auto' }}>
-                    {metrics?.recent_activity?.map((activity: any, index: number) => (
-                      <Box key={index} sx={{ display: 'flex', alignItems: 'center', py: 1, borderBottom: '1px solid', borderColor: 'divider' }}>
-                        <Box sx={{ mr: 2 }}>
-                          {getStatusIcon(activity.status)}
-                        </Box>
-                        <Box sx={{ flexGrow: 1 }}>
-                          <Typography variant="body2">{activity.message}</Typography>
-                          <Typography variant="caption" color="text.secondary">
-                            {new Date(activity.timestamp).toLocaleString()}
-                          </Typography>
-                        </Box>
-                      </Box>
-                    )) || (
-                      <Typography variant="body2" color="text.secondary">
-                        No recent activity
-                      </Typography>
-                    )}
-                  </Box>
-                </CardContent>
-              </Card>
+              <ActivityTimeline
+                activities={recentActivity || []}
+                onRefresh={handleRefresh}
+                loading={isLoading}
+                maxHeight={400}
+              />
             </Grid>
 
-            {/* Quick Actions */}
             <Grid item xs={12} md={4}>
-              <Card>
-                <CardContent>
-                  <Typography variant="h6" gutterBottom>
-                    Quick Actions
-                  </Typography>
-                  <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-                    <Chip
-                      icon={<Science />}
-                      label="Run Security Scan"
-                      clickable
-                      color="primary"
-                      variant="outlined"
-                    />
-                    <Chip
-                      icon={<Analytics />}
-                      label="Generate Report"
-                      clickable
-                      color="secondary"
-                      variant="outlined"
-                    />
-                    <Chip
-                      icon={<Settings />}
-                      label="Configure Alerts"
-                      clickable
-                      color="default"
-                      variant="outlined"
-                    />
-                  </Box>
-                </CardContent>
-              </Card>
+              <QuickActionsPanel
+                onAction={handleQuickAction}
+                loading={isLoading}
+              />
             </Grid>
           </Grid>
         </TabPanel>

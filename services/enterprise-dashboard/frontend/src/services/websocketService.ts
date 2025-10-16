@@ -1,144 +1,264 @@
-import React, { createContext, useContext, useEffect, useState, useRef } from 'react';
+import React from 'react';
 
-interface WebSocketMessage {
+/**
+ * WebSocket Service for Real-time Dashboard Updates
+ * Handles WebSocket connections and message broadcasting
+ */
+
+export interface WebSocketMessage {
   type: string;
-  data: any;
-  timestamp: string;
+  data?: any;
+  timestamp?: string;
 }
 
-interface WebSocketContextType {
-  isConnected: boolean;
-  lastMessage: WebSocketMessage | null;
-  sendMessage: (message: any) => void;
-  subscribe: (eventType: string, callback: (data: any) => void) => void;
-  unsubscribe: (eventType: string, callback: (data: any) => void) => void;
+export interface WebSocketSubscription {
+  topic: string;
+  callback: (message: WebSocketMessage) => void;
 }
 
-const WebSocketContext = createContext<WebSocketContextType | undefined>(undefined);
+class WebSocketService {
+  private ws: WebSocket | null = null;
+  private reconnectAttempts = 0;
+  private maxReconnectAttempts = 5;
+  private reconnectDelay = 1000; // Start with 1 second
+  private maxReconnectDelay = 30000; // Max 30 seconds
+  private subscriptions: Map<string, Set<(message: WebSocketMessage) => void>> = new Map();
+  private isConnecting = false;
+  private shouldReconnect = true;
+  private pingInterval: NodeJS.Timeout | null = null;
+  private pongTimeout: NodeJS.Timeout | null = null;
 
-export const useWebSocket = () => {
-  const context = useContext(WebSocketContext);
-  if (!context) {
-    throw new Error('useWebSocket must be used within a WebSocketProvider');
+  constructor() {
+    this.connect();
   }
-  return context;
-};
 
-interface WebSocketProviderProps {
-  children: React.ReactNode;
-}
+  private connect(): void {
+    if (this.isConnecting || (this.ws && this.ws.readyState === WebSocket.OPEN)) {
+      return;
+    }
 
-export const WebSocketProvider: React.FC<WebSocketProviderProps> = ({ children }) => {
-  const [isConnected, setIsConnected] = useState(false);
-  const [lastMessage, setLastMessage] = useState<WebSocketMessage | null>(null);
-  const ws = useRef<WebSocket | null>(null);
-  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const subscribers = useRef<Map<string, Set<(data: any) => void>>>(new Map());
-
-  const connect = () => {
+    this.isConnecting = true;
+    const wsUrl = process.env.REACT_APP_WS_URL || 'ws://localhost:8007/ws';
+    
     try {
-      const wsUrl = process.env.REACT_APP_WS_URL || 'ws://localhost:8007/ws';
-      ws.current = new WebSocket(wsUrl);
-
-      ws.current.onopen = () => {
-        console.log('WebSocket connected');
-        setIsConnected(true);
-        if (reconnectTimeoutRef.current) {
-          clearTimeout(reconnectTimeoutRef.current);
-          reconnectTimeoutRef.current = null;
-        }
-      };
-
-      ws.current.onmessage = (event) => {
-        try {
-          const message: WebSocketMessage = JSON.parse(event.data);
-          setLastMessage(message);
-          
-          // Notify subscribers
-          const callbacks = subscribers.current.get(message.type);
-          if (callbacks) {
-            callbacks.forEach(callback => callback(message.data));
-          }
-        } catch (error) {
-          console.error('Error parsing WebSocket message:', error);
-        }
-      };
-
-      ws.current.onclose = () => {
-        console.log('WebSocket disconnected');
-        setIsConnected(false);
-        
-        // Attempt to reconnect after 3 seconds
-        if (!reconnectTimeoutRef.current) {
-          reconnectTimeoutRef.current = setTimeout(() => {
-            console.log('Attempting to reconnect WebSocket...');
-            connect();
-          }, 3000);
-        }
-      };
-
-      ws.current.onerror = (error) => {
-        console.error('WebSocket error:', error);
-      };
+      this.ws = new WebSocket(wsUrl);
+      this.setupEventHandlers();
     } catch (error) {
-      console.error('Error creating WebSocket connection:', error);
+      console.error('Failed to create WebSocket connection:', error);
+      this.handleReconnect();
     }
-  };
+  }
 
-  const disconnect = () => {
-    if (ws.current) {
-      ws.current.close();
-      ws.current = null;
-    }
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current);
-      reconnectTimeoutRef.current = null;
-    }
-  };
+  private setupEventHandlers(): void {
+    if (!this.ws) return;
 
-  const sendMessage = (message: any) => {
-    if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-      ws.current.send(JSON.stringify(message));
+    this.ws.onopen = () => {
+      console.log('✅ WebSocket connected');
+      this.isConnecting = false;
+      this.reconnectAttempts = 0;
+      this.reconnectDelay = 1000;
+      this.startPingInterval();
+    };
+
+    this.ws.onmessage = (event) => {
+      try {
+        const message: WebSocketMessage = JSON.parse(event.data);
+        this.handleMessage(message);
+      } catch (error) {
+        console.error('Failed to parse WebSocket message:', error);
+      }
+    };
+
+    this.ws.onclose = (event) => {
+      console.log('WebSocket disconnected:', event.code, event.reason);
+      this.isConnecting = false;
+      this.stopPingInterval();
+      
+      if (this.shouldReconnect && !event.wasClean) {
+        this.handleReconnect();
+      }
+    };
+
+    this.ws.onerror = (error) => {
+      console.error('WebSocket error:', error);
+      this.isConnecting = false;
+    };
+  }
+
+  private handleMessage(message: WebSocketMessage): void {
+    console.log('📨 WebSocket message received:', message);
+
+    // Handle pong responses
+    if (message.type === 'pong') {
+      if (this.pongTimeout) {
+        clearTimeout(this.pongTimeout);
+        this.pongTimeout = null;
+      }
+      return;
+    }
+
+    // Broadcast to all subscribers
+    this.subscriptions.forEach((callbacks) => {
+      callbacks.forEach((callback) => {
+        try {
+          callback(message);
+        } catch (error) {
+          console.error('Error in WebSocket callback:', error);
+        }
+      });
+    });
+  }
+
+  private handleReconnect(): void {
+    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+      console.error('Max reconnection attempts reached');
+      return;
+    }
+
+    this.reconnectAttempts++;
+    const delay = Math.min(this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1), this.maxReconnectDelay);
+    
+    console.log(`Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+    
+    setTimeout(() => {
+      this.connect();
+    }, delay);
+  }
+
+  private startPingInterval(): void {
+    this.stopPingInterval();
+    this.pingInterval = setInterval(() => {
+      this.ping();
+    }, 30000); // Ping every 30 seconds
+  }
+
+  private stopPingInterval(): void {
+    if (this.pingInterval) {
+      clearInterval(this.pingInterval);
+      this.pingInterval = null;
+    }
+    if (this.pongTimeout) {
+      clearTimeout(this.pongTimeout);
+      this.pongTimeout = null;
+    }
+  }
+
+  private ping(): void {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.send({
+        type: 'ping',
+        timestamp: new Date().toISOString()
+      });
+
+      // Set timeout for pong response
+      this.pongTimeout = setTimeout(() => {
+        console.warn('Pong timeout, reconnecting...');
+        this.ws?.close();
+      }, 5000);
+    }
+  }
+
+  public send(message: WebSocketMessage): void {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(message));
     } else {
-      console.warn('WebSocket is not connected. Cannot send message.');
+      console.warn('WebSocket not connected, cannot send message');
     }
-  };
+  }
 
-  const subscribe = (eventType: string, callback: (data: any) => void) => {
-    if (!subscribers.current.has(eventType)) {
-      subscribers.current.set(eventType, new Set());
+  public subscribe(topic: string, callback: (message: WebSocketMessage) => void): () => void {
+    if (!this.subscriptions.has(topic)) {
+      this.subscriptions.set(topic, new Set());
     }
-    subscribers.current.get(eventType)!.add(callback);
-  };
+    
+    this.subscriptions.get(topic)!.add(callback);
 
-  const unsubscribe = (eventType: string, callback: (data: any) => void) => {
-    const callbacks = subscribers.current.get(eventType);
+    // Send subscription message to server
+    this.send({
+      type: 'subscribe',
+      topic: topic,
+      timestamp: new Date().toISOString()
+    });
+
+    // Return unsubscribe function
+    return () => {
+      this.unsubscribe(topic, callback);
+    };
+  }
+
+  public unsubscribe(topic: string, callback: (message: WebSocketMessage) => void): void {
+    const callbacks = this.subscriptions.get(topic);
     if (callbacks) {
       callbacks.delete(callback);
       if (callbacks.size === 0) {
-        subscribers.current.delete(eventType);
+        this.subscriptions.delete(topic);
+        // Send unsubscribe message to server
+        this.send({
+          type: 'unsubscribe',
+          topic: topic,
+          timestamp: new Date().toISOString()
+        });
       }
     }
-  };
+  }
 
-  useEffect(() => {
-    connect();
+  public getConnectionState(): number {
+    return this.ws ? this.ws.readyState : WebSocket.CLOSED;
+  }
+
+  public isConnected(): boolean {
+    return this.ws ? this.ws.readyState === WebSocket.OPEN : false;
+  }
+
+  public disconnect(): void {
+    this.shouldReconnect = false;
+    this.stopPingInterval();
+    if (this.ws) {
+      this.ws.close();
+      this.ws = null;
+    }
+  }
+
+  public reconnect(): void {
+    this.shouldReconnect = true;
+    this.reconnectAttempts = 0;
+    this.disconnect();
+    this.connect();
+  }
+}
+
+// Create singleton instance
+const webSocketService = new WebSocketService();
+
+// React hook for using WebSocket
+export const useWebSocket = () => {
+  const [isConnected, setIsConnected] = React.useState(webSocketService.isConnected());
+  const [lastMessage, setLastMessage] = React.useState<WebSocketMessage | null>(null);
+
+  React.useEffect(() => {
+    const unsubscribe = webSocketService.subscribe('all', (message) => {
+      setLastMessage(message);
+    });
+
+    // Check connection status periodically
+    const statusInterval = setInterval(() => {
+      setIsConnected(webSocketService.isConnected());
+    }, 1000);
+
     return () => {
-      disconnect();
+      unsubscribe();
+      clearInterval(statusInterval);
     };
   }, []);
 
-  const value: WebSocketContextType = {
+  return {
     isConnected,
     lastMessage,
-    sendMessage,
-    subscribe,
-    unsubscribe,
+    subscribe: webSocketService.subscribe.bind(webSocketService),
+    unsubscribe: webSocketService.unsubscribe.bind(webSocketService),
+    send: webSocketService.send.bind(webSocketService),
+    reconnect: webSocketService.reconnect.bind(webSocketService)
   };
-
-  return (
-    <WebSocketContext.Provider value={value}>
-      {children}
-    </WebSocketContext.Provider>
-  );
 };
+
+export default webSocketService;
