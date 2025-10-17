@@ -269,6 +269,15 @@ class ModelCache:
         # LRU Cache configuration
         self.max_models = 3  # Maximum number of models to keep in memory
         self._shutdown = False
+        
+        # Memory management
+        self.max_memory_mb = 2048  # Maximum memory usage in MB
+        self.model_access_order = OrderedDict()  # LRU tracking
+        self.memory_monitor_enabled = True
+        
+        # In-memory log storage for real-time access
+        self.logs = []
+        self.max_logs = 1000  # Keep last 1000 log entries
     
     def __del__(self):
         """Cleanup all resources"""
@@ -292,12 +301,6 @@ class ModelCache:
             logger.info("✅ [CACHE] ModelCache cleanup completed")
         except Exception as e:
             logger.error(f"❌ [CACHE] Error during ModelCache cleanup: {e}")
-        self.max_memory_mb = 2048  # Maximum memory usage in MB
-        self.model_access_order = OrderedDict()  # LRU tracking
-        self.memory_monitor_enabled = True
-        # In-memory log storage for real-time access
-        self.logs = []
-        self.max_logs = 1000  # Keep last 1000 log entries
     
     def _add_log(self, level: str, message: str, model_name: str = None, details: Dict[str, Any] = None):
         """Add a log entry to in-memory storage"""
@@ -642,6 +645,195 @@ class ModelCache:
             models_loaded=list(self.models.keys()),
             timestamp=time.time()
         )
+    
+    async def _load_trained_model_from_mlflow(self, model_name: str) -> bool:
+        """Load trained model from MLflow/MinIO storage"""
+        try:
+            logger.info(f"🔄 [MLFLOW] Loading trained model {model_name} from MLflow...")
+            self._add_log("INFO", f"Starting MLflow model load for {model_name}", model_name)
+            
+            # Extract base model name (remove _trained suffix)
+            base_name = model_name.replace("_trained", "").replace("_trained", "")
+            
+            # Get model info from MLflow via training service
+            import httpx
+            async with httpx.AsyncClient() as client:
+                try:
+                    # Get model info from training service
+                    response = await client.get(
+                        f"{self.training_api_url}/models/{base_name}/info",
+                        timeout=30.0
+                    )
+                    if response.status_code != 200:
+                        logger.warning(f"⚠️ [MLFLOW] Could not get model info from training service: {response.status_code}")
+                        # Fallback: try to load from MLflow directly
+                        return await self._load_trained_model_direct_from_mlflow(model_name, base_name)
+                    
+                    model_info = response.json()
+                    model_uri = model_info.get("mlflow_uri")
+                    
+                    if not model_uri:
+                        logger.error(f"❌ [MLFLOW] No MLflow URI found for model {base_name}")
+                        return False
+                    
+                    logger.info(f"📥 [MLFLOW] Model URI: {model_uri}")
+                    
+                    # Load model from MLflow
+                    return await self._load_trained_model_direct_from_mlflow(model_name, base_name, model_uri)
+                    
+                except Exception as e:
+                    logger.warning(f"⚠️ [MLFLOW] Training service unavailable, trying direct MLflow load: {e}")
+                    return await self._load_trained_model_direct_from_mlflow(model_name, base_name)
+                    
+        except Exception as e:
+            logger.error(f"❌ [MLFLOW] Failed to load trained model {model_name}: {e}")
+            self._add_log("ERROR", f"MLflow model load failed: {e}", model_name)
+            return False
+    
+    async def _load_trained_model_direct_from_mlflow(self, model_name: str, base_name: str, model_uri: str = None) -> bool:
+        """Load trained model directly from MLflow using artifact management"""
+        try:
+            import mlflow.pytorch
+            import tempfile
+            import os
+            import shutil
+            import os
+            
+            # Set MLflow tracking URI
+            import mlflow
+            mlflow.set_tracking_uri("http://mlflow:5000")
+            
+            # Set AWS credentials for MinIO access
+            os.environ["AWS_ACCESS_KEY_ID"] = os.getenv("AWS_ACCESS_KEY_ID", "minioadmin")
+            os.environ["AWS_SECRET_ACCESS_KEY"] = os.getenv("AWS_SECRET_ACCESS_KEY", "minioadmin")
+            os.environ["AWS_DEFAULT_REGION"] = os.getenv("AWS_DEFAULT_REGION", "us-east-1")
+            os.environ["MLFLOW_S3_ENDPOINT_URL"] = os.getenv("MLFLOW_S3_ENDPOINT_URL", "http://minio:9000")
+            
+            # Construct model URI if not provided
+            if not model_uri:
+                model_uri = f"models:/security_{base_name}/latest"
+            
+            logger.info(f"📥 [MLFLOW] Loading model from URI: {model_uri}")
+            
+            # Create temporary directory for model download
+            with tempfile.TemporaryDirectory() as temp_dir:
+                try:
+                    # Download model from MLflow using artifact management
+                    # mlflow.pytorch.load_model returns the actual PyTorch model, not a path
+                    pytorch_model = mlflow.pytorch.load_model(model_uri, dst_path=temp_dir)
+                    
+                    logger.info(f"✅ [MLFLOW] Model downloaded successfully")
+                    
+                    # Create a special CachedModel for MLflow models
+                    cached_model = CachedModel(
+                        model_name=model_name,
+                        model_path=temp_dir,  # Use temp_dir as the base path
+                        model_source="MLflow"
+                    )
+                    
+                    # Store the loaded PyTorch model directly
+                    cached_model.model = pytorch_model
+                    cached_model.loaded = True
+                    cached_model.model_type = "pytorch"
+                    
+                    # Set up tokenizer if available
+                    try:
+                        from transformers import AutoTokenizer
+                        cached_model.tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+                        logger.info(f"✅ [MLFLOW] Tokenizer loaded for {model_name}")
+                    except Exception as e:
+                        logger.warning(f"⚠️ [MLFLOW] Could not load tokenizer: {e}")
+                    
+                    # Store the model in cache
+                    self.models[model_name] = cached_model
+                    self.stats["model_loads"] += 1
+                    
+                    # Check memory limits
+                    self._check_memory_limits()
+                    
+                    logger.info(f"✅ [MLFLOW] Successfully loaded trained model {model_name}")
+                    self._add_log("INFO", f"Trained model loaded from MLflow: {model_name}", model_name)
+                    return True
+                        
+                except Exception as e:
+                    logger.error(f"❌ [MLFLOW] Model loading failed: {e}")
+                    # Try alternative loading method
+                    return await self._load_trained_model_fallback(model_name, base_name, model_uri, temp_dir)
+                    
+        except Exception as e:
+            logger.error(f"❌ [MLFLOW] Direct MLflow load failed for {model_name}: {e}")
+            self._add_log("ERROR", f"Direct MLflow load failed: {e}", model_name)
+            return False
+    
+    async def _load_trained_model_fallback(self, model_name: str, base_name: str, model_uri: str, temp_dir: str) -> bool:
+        """Fallback method to load trained model using alternative approach"""
+        try:
+            import mlflow
+            import os
+            
+            logger.info(f"🔄 [MLFLOW] Trying fallback loading method for {model_name}")
+            
+            # Set AWS credentials for MinIO access
+            os.environ["AWS_ACCESS_KEY_ID"] = os.getenv("AWS_ACCESS_KEY_ID", "minioadmin")
+            os.environ["AWS_SECRET_ACCESS_KEY"] = os.getenv("AWS_SECRET_ACCESS_KEY", "minioadmin")
+            os.environ["AWS_DEFAULT_REGION"] = os.getenv("AWS_DEFAULT_REGION", "us-east-1")
+            os.environ["MLFLOW_S3_ENDPOINT_URL"] = os.getenv("MLFLOW_S3_ENDPOINT_URL", "http://minio:9000")
+            
+            # Try to get model info first
+            client = mlflow.tracking.MlflowClient(tracking_uri="http://mlflow:5000")
+            
+            # Get the latest model version
+            model_name_clean = f"security_{base_name}"
+            try:
+                latest_version = client.get_latest_versions(model_name_clean, stages=["None", "Staging", "Production"])
+                if not latest_version:
+                    logger.error(f"❌ [MLFLOW] No versions found for model {model_name_clean}")
+                    return False
+                
+                model_version = latest_version[0]
+                model_uri = f"models:/{model_name_clean}/{model_version.version}"
+                logger.info(f"📥 [MLFLOW] Using model URI: {model_uri}")
+                
+            except Exception as e:
+                logger.warning(f"⚠️ [MLFLOW] Could not get model version, using default URI: {e}")
+            
+            # Load model using mlflow.pytorch.load_model
+            import mlflow.pytorch
+            pytorch_model = mlflow.pytorch.load_model(model_uri, dst_path=temp_dir)
+            
+            # Create CachedModel instance for MLflow model
+            cached_model = CachedModel(
+                model_name=model_name,
+                model_path=temp_dir,  # Use temp_dir as the base path
+                model_source="MLflow"
+            )
+            
+            # Store the loaded PyTorch model directly
+            cached_model.model = pytorch_model
+            cached_model.loaded = True
+            cached_model.model_type = "pytorch"
+            
+            # Set up tokenizer if available
+            try:
+                from transformers import AutoTokenizer
+                cached_model.tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+                logger.info(f"✅ [MLFLOW] Tokenizer loaded for {model_name}")
+            except Exception as e:
+                logger.warning(f"⚠️ [MLFLOW] Could not load tokenizer: {e}")
+            
+            # Store the model in cache
+            self.models[model_name] = cached_model
+            self.stats["model_loads"] += 1
+            self._check_memory_limits()
+            
+            logger.info(f"✅ [MLFLOW] Fallback loading successful for {model_name}")
+            self._add_log("INFO", f"Trained model loaded via fallback: {model_name}", model_name)
+            return True
+                
+        except Exception as e:
+            logger.error(f"❌ [MLFLOW] Fallback loading failed for {model_name}: {e}")
+            self._add_log("ERROR", f"Fallback loading failed: {e}", model_name)
+            return False
 
 
 # Initialize model cache
@@ -847,6 +1039,48 @@ async def preload_model(model_name: str):
             
     except Exception as e:
         logger.error(f"Failed to preload model {model_name}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/models/{model_name}/load")
+async def load_model(model_name: str):
+    """Load a model into cache (supports both pretrained and trained models)"""
+    try:
+        # Check if model is already loaded
+        if model_name in model_cache.models and model_cache.models[model_name].loaded:
+            return {
+                "status": "success",
+                "message": f"Model {model_name} already loaded in cache",
+                "model_name": model_name,
+                "loaded": True,
+                "timestamp": time.time()
+            }
+        
+        # Determine if this is a trained model or pretrained model
+        is_trained_model = model_name.endswith("_trained")
+        
+        if is_trained_model:
+            # Load trained model from MLflow/MinIO
+            logger.info(f"🔄 [LOAD] Loading trained model {model_name} from MLflow...")
+            success = await model_cache._load_trained_model_from_mlflow(model_name)
+        else:
+            # Load pretrained model from Hugging Face
+            logger.info(f"🔄 [LOAD] Loading pretrained model {model_name} from Hugging Face...")
+            success = await model_cache._load_model_directly(model_name)
+        
+        if success:
+            return {
+                "status": "success",
+                "message": f"Model {model_name} loaded successfully",
+                "model_name": model_name,
+                "loaded": True,
+                "model_type": "trained" if is_trained_model else "pretrained",
+                "timestamp": time.time()
+            }
+        else:
+            raise HTTPException(status_code=500, detail=f"Failed to load model {model_name}")
+            
+    except Exception as e:
+        logger.error(f"Failed to load model {model_name}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/metrics")

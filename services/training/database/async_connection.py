@@ -303,6 +303,30 @@ class DatabaseManager:
                 );
             """)
             
+            # Create model metadata table
+            await self.execute_command("""
+                CREATE TABLE IF NOT EXISTS training.model_metadata (
+                    model_name VARCHAR(255) NOT NULL,
+                    version VARCHAR(100) NOT NULL,
+                    metrics JSONB NOT NULL,
+                    training_data_path VARCHAR(500),
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (model_name, version)
+                );
+            """)
+            
+            # Create model lineage table
+            await self.execute_command("""
+                CREATE TABLE IF NOT EXISTS training.model_lineage (
+                    id SERIAL PRIMARY KEY,
+                    parent_model VARCHAR(255),
+                    child_model VARCHAR(255) NOT NULL,
+                    version VARCHAR(100) NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            
             # Create indexes for efficient log queries
             await self.execute_command("""
                 CREATE INDEX IF NOT EXISTS idx_training_logs_job_id 
@@ -312,6 +336,18 @@ class DatabaseManager:
             await self.execute_command("""
                 CREATE INDEX IF NOT EXISTS idx_training_logs_timestamp 
                 ON training.training_logs(timestamp);
+            """)
+            
+            # Create indexes for model metadata
+            await self.execute_command("""
+                CREATE INDEX IF NOT EXISTS idx_model_metadata_model_name 
+                ON training.model_metadata(model_name);
+            """)
+            
+            # Create indexes for model lineage
+            await self.execute_command("""
+                CREATE INDEX IF NOT EXISTS idx_model_lineage_child_model 
+                ON training.model_lineage(child_model);
             """)
             
             logger.info("Training database schema initialized successfully")

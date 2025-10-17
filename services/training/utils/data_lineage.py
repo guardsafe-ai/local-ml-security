@@ -129,19 +129,26 @@ class DataLineageTracker:
     def validate_label_consistency(self, texts: List[str], labels: List[str]) -> bool:
         """Validate that labels are consistent and properly distributed"""
         try:
+            logger.info(f"🔍 [DATA VALIDATION] Starting validation with {len(texts)} texts and {len(labels)} labels")
+            
             if len(texts) != len(labels):
                 logger.error(f"❌ [DATA VALIDATION] Mismatch between texts ({len(texts)}) and labels ({len(labels)})")
                 return False
             
             # Check for empty texts or labels
             empty_texts = sum(1 for text in texts if not text or not text.strip())
-            empty_labels = sum(1 for label in labels if not label or not str(label).strip())
+            empty_labels = sum(1 for label in labels if label is None or (isinstance(label, str) and not label.strip()))
+            
+            logger.info(f"🔍 [DATA VALIDATION] Empty texts: {empty_texts}, Empty labels: {empty_labels}")
             
             if empty_texts > 0:
                 logger.warning(f"⚠️ [DATA VALIDATION] {empty_texts} empty texts found")
             
             if empty_labels > 0:
                 logger.error(f"❌ [DATA VALIDATION] {empty_labels} empty labels found")
+                # Show some examples of empty labels
+                empty_label_indices = [i for i, label in enumerate(labels) if not label or not str(label).strip()]
+                logger.error(f"❌ [DATA VALIDATION] Empty label indices: {empty_label_indices[:10]}")
                 return False
             
             # Check label distribution

@@ -115,11 +115,12 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '6.0'
-          memory: 6G
+          cpus: '4.0'
+          memory: 4G
         reservations:
-          cpus: '2.0'
-          memory: 2G
+          cpus: '1.0'
+          memory: 1G
+    command: ["nice", "-n", "10", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8002"]
     networks:
       - ml-network
 
@@ -134,25 +135,25 @@ services:
       - REDIS_URL=redis://redis:6379
       - MLFLOW_TRACKING_URI=http://mlflow:5000
       - JAEGER_AGENT_HOST=jaeger
+      - JAEGER_AGENT_PORT=14268
       - AWS_ACCESS_KEY_ID=minioadmin
       - AWS_SECRET_ACCESS_KEY=minioadmin
       - MLFLOW_S3_ENDPOINT_URL=http://minio:9000
-      - JAEGER_AGENT_PORT=14268
       - NVIDIA_VISIBLE_DEVICES=all
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
     depends_on:
       - redis
       - mlflow
       - jaeger
     volumes:
       - ./services/model-api:/app
-    deploy:
-      resources:
-        limits:
-          cpus: '4.0'
-          memory: 8G
-        reservations:
-          cpus: '2.0'
-          memory: 4G
     networks:
       - ml-network
 
@@ -167,9 +168,16 @@ services:
     environment:
       - REDIS_URL=redis://redis:6379
       - MLFLOW_TRACKING_URI=http://mlflow:5000
+      # MinIO configuration for MLflow artifact access
+      - MINIO_URL=http://minio:9000
+      - AWS_ACCESS_KEY_ID=minioadmin
+      - AWS_SECRET_ACCESS_KEY=minioadmin
+      - AWS_DEFAULT_REGION=us-east-1
+      - MLFLOW_S3_ENDPOINT_URL=http://minio:9000
     depends_on:
       - redis
       - mlflow
+      - minio
     volumes:
       - ./data/cache:/app/cache
     networks:
@@ -390,41 +398,41 @@ services:
       retries: 3
       start_period: 30s
 
-  # Enterprise Dashboard Frontend (Direct Service Integration)
-  enterprise-dashboard-frontend:
-    build:
-      context: ./services/enterprise-dashboard/frontend
-      dockerfile: Dockerfile.new
-    container_name: enterprise-dashboard-frontend
-    ports:
-      - "3000:3000"
-    environment:
-      # Backend API Gateway connection
-      - REACT_APP_BACKEND_URL=http://enterprise-dashboard-backend:8007
-      # Direct service connections (fallback)
-      - REACT_APP_MODEL_API_URL=http://model-api:8000
-      - REACT_APP_TRAINING_API_URL=http://training:8002
-      - REACT_APP_MODEL_CACHE_URL=http://model-cache:8003
-      - REACT_APP_BUSINESS_METRICS_URL=http://business-metrics:8004
-      - REACT_APP_ANALYTICS_URL=http://analytics:8006
-      - REACT_APP_DATA_PRIVACY_URL=http://data-privacy:8005
-      - REACT_APP_MONITORING_URL=http://monitoring:8006
-      - REACT_APP_TRACING_URL=http://tracing:8009
-      - REACT_APP_MLFLOW_URL=http://mlflow:5000
-      # WebSocket connections (direct to services with WebSocket support)
-      - REACT_APP_WS_URL=ws://model-api:8000/ws
-    depends_on:
-      - enterprise-dashboard-backend
-      - model-api
-      - training
-      - model-cache
-      - business-metrics
-      - analytics
-      - data-privacy
-      - mlflow
-    networks:
-      - ml-network
-    restart: unless-stopped
+  # Enterprise Dashboard Frontend (Direct Service Integration) - COMMENTED OUT FOR TESTING
+  # enterprise-dashboard-frontend:
+  #   build:
+  #     context: ./services/enterprise-dashboard/frontend
+  #     dockerfile: Dockerfile
+  #   container_name: enterprise-dashboard-frontend
+  #   ports:
+  #     - "3000:3000"
+  #   environment:
+  #     # Backend API Gateway connection
+  #     - REACT_APP_BACKEND_URL=http://enterprise-dashboard-backend:8007
+  #     # Direct service connections (fallback)
+  #     - REACT_APP_MODEL_API_URL=http://model-api:8000
+  #     - REACT_APP_TRAINING_API_URL=http://training:8002
+  #     - REACT_APP_MODEL_CACHE_URL=http://model-cache:8003
+  #     - REACT_APP_BUSINESS_METRICS_URL=http://business-metrics:8004
+  #     - REACT_APP_ANALYTICS_URL=http://analytics:8006
+  #     - REACT_APP_DATA_PRIVACY_URL=http://data-privacy:8005
+  #     - REACT_APP_MONITORING_URL=http://monitoring:8006
+  #     - REACT_APP_TRACING_URL=http://tracing:8009
+  #     - REACT_APP_MLFLOW_URL=http://mlflow:5000
+  #     # WebSocket connections (direct to services with WebSocket support)
+  #     - REACT_APP_WS_URL=ws://model-api:8000/ws
+  #   depends_on:
+  #     - enterprise-dashboard-backend
+  #     - model-api
+  #     - training
+  #     - model-cache
+  #     - business-metrics
+  #     - analytics
+  #     - data-privacy
+  #     - mlflow
+  #   networks:
+  #     - ml-network
+  #   restart: unless-stopped
 
 volumes:
   postgres_data:

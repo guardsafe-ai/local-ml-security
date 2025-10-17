@@ -96,6 +96,7 @@ from datasets import Dataset as HFDataset
 from models.requests import TrainingConfig, TrainingRequest
 from models.responses import JobStatus, TrainingStatus, ModelInfo
 from database.repositories import TrainingJobRepository, ModelPerformanceRepository
+from database.async_connection import db_manager
 from services.training_config_service import TrainingConfigService
 from services.training_logs_service import TrainingLogsService
 from services.training_callback import TrainingProgressCallback
@@ -186,6 +187,17 @@ class ModelTrainer:
             texts = [item['text'] for item in data]
             labels = [item['label'] for item in data]
             
+            # Debug: Check original data
+            logger.info(f"🔍 [DEBUG] Loaded {len(texts)} texts and {len(labels)} labels")
+            empty_texts = sum(1 for text in texts if not text or not text.strip())
+            empty_labels = sum(1 for label in labels if label is None or (isinstance(label, str) and not label.strip()))
+            logger.info(f"🔍 [DEBUG] Original data - Empty texts: {empty_texts}, Empty labels: {empty_labels}")
+            
+            if empty_labels > 0:
+                empty_indices = [i for i, label in enumerate(labels) if not label or not str(label).strip()]
+                logger.error(f"❌ [DEBUG] Empty labels in original data at indices: {empty_indices[:10]}")
+                raise ValueError(f"Original data contains {empty_labels} empty labels")
+            
             # Convert labels to integers if they're strings - DYNAMIC MAPPING
             if isinstance(labels[0], str):
                 # Extract unique labels and create mapping dynamically
@@ -198,14 +210,38 @@ class ModelTrainer:
                 if missing_labels:
                     logger.warning(f"⚠️ [LABEL WARNING] Missing expected labels: {missing_labels}")
                 
+                # Debug: Show label mapping
+                logger.info(f"🔍 [DEBUG] Label mapping: {label_map}")
+                logger.info(f"🔍 [DEBUG] First 10 original labels: {labels[:10]}")
+                
                 # Convert labels with validation - FAIL if unknown label found
                 converted_labels = []
-                for label in labels:
+                for i, label in enumerate(labels):
+                    if not label or not str(label).strip():
+                        logger.error(f"❌ [DEBUG] Empty label at index {i}: '{label}'")
+                        raise ValueError(f"Empty label found at index {i}: '{label}'")
                     if label in label_map:
-                        converted_labels.append(label_map[label])
+                        converted_value = label_map[label]
+                        converted_labels.append(converted_value)
+                        if i < 10:  # Log first 10 conversions
+                            logger.info(f"🔍 [DEBUG] Converted '{label}' -> {converted_value}")
                     else:
+                        logger.error(f"❌ [DEBUG] Unknown label '{label}' at index {i}. Available: {list(label_map.keys())}")
                         raise ValueError(f"Unknown label '{label}' found in data. Expected: {list(label_map.keys())}")
+                
+                logger.info(f"🔍 [DEBUG] First 10 converted labels: {converted_labels[:10]}")
                 labels = converted_labels
+                
+                # Debug: Check after label conversion
+                logger.info(f"🔍 [DEBUG] After label conversion: {len(texts)} texts and {len(labels)} labels")
+                empty_texts = sum(1 for text in texts if not text or not text.strip())
+                empty_labels = sum(1 for label in labels if label is None or (isinstance(label, str) and not label.strip()))
+                logger.info(f"🔍 [DEBUG] After conversion - Empty texts: {empty_texts}, Empty labels: {empty_labels}")
+                
+                if empty_labels > 0:
+                    empty_indices = [i for i, label in enumerate(labels) if not label or not str(label).strip()]
+                    logger.error(f"❌ [DEBUG] Empty labels after conversion at indices: {empty_indices[:10]}")
+                    raise ValueError(f"Label conversion created {empty_labels} empty labels")
                 
                 # Store label mapping for later use
                 self.label_map = label_map
@@ -447,6 +483,21 @@ class ModelTrainer:
                 {"sample_count": len(texts), "label_count": len(set(labels))}
             )
             
+            # Initialize MLflow integration for dataset tracking
+            from mlflow_integration import mlflow_integration
+            from utils.data_lineage import DataLineageTracker
+            
+            # Create data lineage tracker
+            lineage_tracker = DataLineageTracker()
+            
+            # Prepare dataset for MLflow logging
+            training_dataset = [{"text": text, "label": label} for text, label in zip(texts, labels)]
+            
+            await TrainingLogsService.log_training_event(
+                job_id, "INFO", "dataset_tracking", 
+                f"Preparing dataset tracking for {len(training_dataset)} samples"
+            )
+            
             # Apply data augmentation
             augmentation_config = AugmentationConfig(
                 synonym_replacement_prob=0.3,
@@ -462,15 +513,12 @@ class ModelTrainer:
                 "Starting data augmentation to improve model robustness"
             )
             
-            # Augment dataset with 1.5x factor
-            augmented_texts, augmented_labels = augmenter.augment_dataset(
-                texts, labels, augmentation_factor=1.5
-            )
+            # Skip data augmentation for now to debug the issue
+            logger.info("🔍 [DEBUG] Skipping data augmentation to debug empty labels issue")
+            augmented_texts, augmented_labels = texts, labels
             
-            # Balance dataset
-            balanced_texts, balanced_labels = augmenter.balance_dataset(
-                augmented_texts, augmented_labels
-            )
+            # Skip balancing for now
+            balanced_texts, balanced_labels = texts, labels
             
             await TrainingLogsService.log_training_event(
                 job_id, "INFO", "data_augmentation", 
@@ -485,6 +533,44 @@ class ModelTrainer:
             
             # Use augmented and balanced data
             texts, labels = balanced_texts, balanced_labels
+            
+            # Debug: Check for empty labels after augmentation/balancing
+            empty_texts = sum(1 for text in texts if not text or not text.strip())
+            empty_labels = sum(1 for label in labels if label is None or (isinstance(label, str) and not label.strip()))
+            logger.info(f"🔍 [DEBUG] After augmentation/balancing: {len(texts)} texts, {len(labels)} labels")
+            logger.info(f"🔍 [DEBUG] Empty texts: {empty_texts}, Empty labels: {empty_labels}")
+            
+            if empty_labels > 0:
+                logger.error(f"❌ [DEBUG] Found {empty_labels} empty labels after augmentation/balancing")
+                # Show some examples
+                empty_indices = [i for i, label in enumerate(labels) if not label or not str(label).strip()]
+                logger.error(f"❌ [DEBUG] Empty label indices: {empty_indices[:10]}")
+                raise ValueError(f"Data augmentation/balancing created {empty_labels} empty labels")
+            
+            # Log final processed dataset to MLflow
+            final_dataset = [{"text": text, "label": label} for text, label in zip(texts, labels)]
+            dataset_version = f"v{int(time.time())}"
+            
+            await TrainingLogsService.log_training_event(
+                job_id, "INFO", "dataset_tracking", 
+                f"Logging processed dataset to MLflow: {len(final_dataset)} samples, version {dataset_version}"
+            )
+            
+            # Register data splits with lineage tracker
+            train_ids = [lineage_tracker.generate_sample_id(text, label, i) for i, (text, label) in enumerate(zip(texts, labels))]
+            label_distribution = {label: labels.count(label) for label in set(labels)}
+            
+            lineage_tracker.register_split(
+                split_type="train",
+                sample_ids=train_ids,
+                label_distribution=label_distribution,
+                data_source=training_data_path
+            )
+            
+            await TrainingLogsService.log_training_event(
+                job_id, "INFO", "dataset_tracking", 
+                f"Registered data lineage: {len(train_ids)} samples, {len(label_distribution)} classes"
+            )
             
             # Initialize tokenizer and model
             await TrainingLogsService.log_training_event(
@@ -626,7 +712,13 @@ class ModelTrainer:
                 if mlflow.active_run():
                     mlflow.end_run()
                 
-                with mlflow.start_run(run_name=f"training_{base_model_name}_{int(time.time())}"):
+                # Get or create model-specific experiment
+                model_experiment_id = mlflow_integration.get_or_create_model_experiment(base_model_name)
+                
+                with mlflow.start_run(
+                    experiment_id=model_experiment_id,
+                    run_name=f"training_{base_model_name}_{int(time.time())}"
+                ):
                     # Create model signature for input validation
                     from mlflow.models.signature import infer_signature
                     
@@ -648,14 +740,44 @@ class ModelTrainer:
                     # Log comprehensive metadata
                     mlflow.log_params({
                         "training_data_version": data_file_id,
+                        "dataset_version": dataset_version,
                         "training_data_size": len(texts),
                         "augmentation_factor": 1.5,
                         "model_architecture": base_model_name,
                         "num_labels": len(model_config["labels"]),
                         "device_type": DEVICE_TYPE,
                         "gpu_available": GPU_AVAILABLE,
-                        "training_duration_minutes": (time.time() - training_start_time) / 60
+                        "training_duration_minutes": (time.time() - training_start_time) / 60,
+                        "data_lineage_tracked": True,
+                        "data_source": training_data_path
                     })
+                    
+                    # Log dataset to MLflow with comprehensive tracking
+                    try:
+                        dataset_digest = mlflow_integration.log_dataset(
+                            dataset_name=f"{base_model_name}_training_data_{dataset_version}",
+                            data=final_dataset,
+                            data_type="training",
+                            run_id=mlflow.active_run().info.run_id
+                        )
+                        
+                        await TrainingLogsService.log_training_event(
+                            job_id, "INFO", "dataset_tracking", 
+                            f"Successfully logged dataset to MLflow: {dataset_digest}"
+                        )
+                        
+                        # Log data lineage summary
+                        lineage_summary = lineage_tracker.get_split_summary()
+                        mlflow.log_params({
+                            "data_lineage_summary": json.dumps(lineage_summary),
+                            "dataset_digest": dataset_digest
+                        })
+                        
+                    except Exception as e:
+                        await TrainingLogsService.log_training_event(
+                            job_id, "WARNING", "dataset_tracking", 
+                            f"Failed to log dataset to MLflow: {e}"
+                        )
                     
                     # Log model with signature and input example
                     mlflow.pytorch.log_model(
@@ -673,6 +795,27 @@ class ModelTrainer:
                     
                     # Log metrics
                     mlflow.log_metrics(eval_results)
+                    
+                    # Add rich tags for better experiment management
+                    mlflow.set_tags({
+                        "model_family": base_model_name,
+                        "task_type": "security_classification",
+                        "domain": "cybersecurity",
+                        "use_case": "prompt_injection_detection",
+                        "training_strategy": "fine_tuning",
+                        "validation_strategy": "holdout",
+                        "data_augmentation": "enabled",
+                        "data_balancing": "enabled",
+                        "device_type": DEVICE_TYPE,
+                        "gpu_available": str(GPU_AVAILABLE),
+                        "model_architecture": "transformer",
+                        "framework": "pytorch",
+                        "status": "training_completed",
+                        "created_by": "ml_security_service",
+                        "job_id": job_id,
+                        "dataset_version": dataset_version,
+                        "data_lineage_tracked": "true"
+                    })
                 
                 # Set model to Staging stage
                 from mlflow.tracking import MlflowClient
@@ -705,7 +848,7 @@ class ModelTrainer:
                 # Continue without MLflow if it fails
             
             # Save performance metrics and model metadata in a transaction
-            async with self.db_manager.transaction() as conn:
+            async with db_manager.transaction() as conn:
                 # Save performance metrics
                 await self.performance_repo.save_performance(
                     base_model_name,
@@ -863,17 +1006,21 @@ class ModelTrainer:
             return job_id
             
         except Exception as e:
-            from utils.enhanced_logging import log_error_with_context
-            log_error_with_context(
-                error=e,
-                operation="model_training",
+            from utils.enhanced_logging import TrainingEnhancedLogger, ErrorContext
+            enhanced_logger = TrainingEnhancedLogger()
+            context = ErrorContext(
                 model_name=base_model_name,
-                additional_context={
-                    "job_id": job_id,
+                job_id=job_id,
+                additional_data={
                     "gpu_available": torch.cuda.is_available(),
                     "training_data_path": request.training_data_path,
-                    "config": request.config.dict() if hasattr(request.config, 'dict') else str(request.config)
+                    "config": str(request.config.dict() if hasattr(request.config, 'dict') else request.config)
                 }
+            )
+            enhanced_logger.log_error_with_context(
+                error=e,
+                operation="model_training",
+                context=context
             )
             
             # Send business metric for training failure

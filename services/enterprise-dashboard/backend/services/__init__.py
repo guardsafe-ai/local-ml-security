@@ -14,7 +14,7 @@ from .business_metrics_client import BusinessMetricsClient
 from .analytics_client import AnalyticsClient
 from .data_privacy_client import DataPrivacyClient
 from .tracing_client import TracingClient
-from .mlflow_client import MLflowClient
+from .mlflow_rest_client import MLflowRESTClient
 
 # Base client
 from .base_client import BaseServiceClient
@@ -29,6 +29,6 @@ __all__ = [
     "AnalyticsClient",
     "DataPrivacyClient",
     "TracingClient",
-    "MLflowClient",
+    "MLflowRESTClient",
     "BaseServiceClient"
 ]
