@@ -179,7 +179,17 @@ class BaseServiceClient:
                     raise ValueError(f"Unsupported HTTP method: {method}")
                 
                 response.raise_for_status()
-                result = response.json()
+                
+                # Handle both JSON and plain text responses
+                try:
+                    result = response.json()
+                except (ValueError, TypeError):
+                    # Handle plain text responses (like MLflow's "OK")
+                    result = {
+                        "status": "ok",
+                        "message": response.text,
+                        "content_type": response.headers.get("content-type", "text/plain")
+                    }
                 
                 # Cache successful GET requests
                 if use_cache and method.upper() == "GET" and response.status_code == 200:

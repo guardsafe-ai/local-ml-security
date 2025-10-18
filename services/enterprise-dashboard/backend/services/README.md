@@ -229,7 +229,7 @@ The architecture includes comprehensive error handling:
 ```python
 # Old way
 from services.api_client import APIClient
-client = APIClient()
+client = MainAPIClient()
 
 # New way (backward compatible)
 from services import MainAPIClient
@@ -237,7 +237,7 @@ client = MainAPIClient()
 
 # Or use the alias for existing code
 from services import APIClient
-client = APIClient()  # Same as MainAPIClient
+client = MainAPIClient()  # Same as MainAPIClient
 ```
 
 ### New Features Available

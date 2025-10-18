@@ -7,7 +7,7 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
-from services.api_client import APIClient
+from services.main_api_client import MainAPIClient
 from models.responses import DashboardMetrics, ServiceHealth, TrainingJob, AttackResult
 
 logger = logging.getLogger(__name__)
@@ -17,7 +17,7 @@ class DashboardService:
     """Core dashboard business logic"""
     
     def __init__(self):
-        self.api_client = APIClient()
+        self.api_client = MainAPIClient()
 
     async def get_dashboard_metrics(self) -> DashboardMetrics:
         """Get comprehensive dashboard metrics"""

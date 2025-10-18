@@ -40,10 +40,18 @@ async def test_service_endpoints():
             try:
                 # Test health endpoint
                 health_response = await client.get(f"{service_url}/health")
+                
+                # Handle both JSON and plain text responses
+                try:
+                    health_data = health_response.json() if health_response.status_code == 200 else None
+                except (json.JSONDecodeError, ValueError):
+                    # Handle plain text responses (like MLflow's "OK")
+                    health_data = health_response.text if health_response.status_code == 200 else None
+                
                 service_results["health"] = {
                     "status": health_response.status_code,
                     "response_time": health_response.elapsed.total_seconds() * 1000,
-                    "data": health_response.json() if health_response.status_code == 200 else None
+                    "data": health_data
                 }
                 print(f"✅ Health: {health_response.status_code} ({service_results['health']['response_time']:.1f}ms)")
                 

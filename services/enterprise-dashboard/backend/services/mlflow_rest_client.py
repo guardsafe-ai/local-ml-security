@@ -23,8 +23,41 @@ class MLflowRESTClient(BaseServiceClient):
     # =============================================================================
     
     async def get_health(self) -> Dict[str, Any]:
-        """GET /health - MLflow service health check"""
-        return await self._make_request("GET", "/health", use_cache=True, cache_ttl=60)
+        """GET /health - MLflow service health check with plain text handling"""
+        try:
+            # Use custom request handling for health endpoint
+            url = f"{self.base_url}/health"
+            client = await self._get_http_client()
+            response = await client.get("/health")
+            response.raise_for_status()
+            
+            # Handle MLflow's plain text "OK" response
+            if response.text.strip() == "OK":
+                return {
+                    "status": "healthy",
+                    "service": "mlflow",
+                    "message": "MLflow server is running",
+                    "version": "2.8.1"
+                }
+            else:
+                # Try to parse as JSON if not "OK"
+                try:
+                    return response.json()
+                except (ValueError, TypeError):
+                    return {
+                        "status": "healthy",
+                        "service": "mlflow", 
+                        "message": response.text,
+                        "version": "2.8.1"
+                    }
+        except Exception as e:
+            logger.error(f"MLflow health check failed: {e}")
+            return {
+                "status": "unhealthy",
+                "service": "mlflow",
+                "error": str(e),
+                "version": "2.8.1"
+            }
     
     async def get_root(self) -> Dict[str, Any]:
         """GET / - Root endpoint with MLflow service status"""

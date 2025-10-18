@@ -8,13 +8,13 @@ from datetime import datetime
 from typing import List
 from fastapi import APIRouter
 from models.responses import HealthResponse, ServiceHealth
-from services.api_client import APIClient
+from services.main_api_client import MainAPIClient
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # Initialize API client
-api_client = APIClient()
+api_client = MainAPIClient()
 
 
 @router.get("/", response_model=HealthResponse)
