@@ -73,6 +73,32 @@ class MLflowIntegration:
         logger.info(f"Created MLflow experiment: {self.experiment_name}")
         return experiment_id
     
+    def get_or_create_model_experiment(self, model_name: str) -> str:
+        """Get or create model-specific experiment"""
+        experiment_name = f"security_{model_name}_experiments"
+        
+        try:
+            experiment = self.client.get_experiment_by_name(experiment_name)
+            if experiment:
+                return experiment.experiment_id
+        except:
+            pass
+        
+        # Create model-specific experiment
+        experiment_id = self.client.create_experiment(
+            experiment_name,
+            tags={
+                "description": f"Security model training experiments for {model_name}",
+                "model_family": model_name,
+                "task_type": "security_classification",
+                "domain": "cybersecurity",
+                "created_by": "ml_security_service",
+                "version": "1.0"
+            }
+        )
+        logger.info(f"Created model-specific experiment: {experiment_name}")
+        return experiment_id
+    
     def log_dataset(
         self, 
         dataset_name: str,
@@ -88,19 +114,21 @@ class MLflowIntegration:
                     f.write(json.dumps(item) + '\n')
                 temp_path = f.name
             
-            # Create dataset from file
-            dataset = mlflow.data.from_jsonl(
-                temp_path,
+            # Create dataset from file using pandas (MLflow 2.8.1 compatible)
+            import pandas as pd
+            df = pd.read_json(temp_path, lines=True)
+            dataset = mlflow.data.from_pandas(
+                df,
                 targets="label",
                 name=dataset_name
             )
             
             # Log dataset
             if run_id:
-                with mlflow.start_run(run_id=run_id):
+                with mlflow.start_run(run_id=run_id, nested=True):
                     dataset_info = mlflow.log_input(dataset, context=data_type)
             else:
-                with mlflow.start_run(experiment_id=self.experiment_id):
+                with mlflow.start_run(experiment_id=self.experiment_id, nested=True):
                     dataset_info = mlflow.log_input(dataset, context=data_type)
             
             # Log dataset metadata
@@ -550,6 +578,99 @@ class MLflowIntegration:
         except Exception as e:
             logger.error(f"❌ Error cleaning up runs: {e}")
             return 0
+    
+    def compare_model_experiments(self, model_names: List[str]) -> Dict[str, Any]:
+        """Compare experiments across different models"""
+        try:
+            comparison = {}
+            
+            for model_name in model_names:
+                experiment_name = f"security_{model_name}_experiments"
+                try:
+                    experiment = self.client.get_experiment_by_name(experiment_name)
+                    if experiment:
+                        runs = self.client.search_runs(
+                            experiment_ids=[experiment.experiment_id],
+                            order_by=["start_time DESC"],
+                            max_results=5
+                        )
+                        
+                        comparison[model_name] = {
+                            "experiment_id": experiment.experiment_id,
+                            "total_runs": len(runs),
+                            "latest_runs": [
+                                {
+                                    "run_id": run.info.run_id,
+                                    "start_time": run.info.start_time,
+                                    "status": run.info.status,
+                                    "metrics": run.data.metrics,
+                                    "tags": run.data.tags
+                                }
+                                for run in runs[:3]  # Latest 3 runs
+                            ]
+                        }
+                except Exception as e:
+                    logger.warning(f"Could not get experiment for {model_name}: {e}")
+                    comparison[model_name] = {"error": str(e)}
+            
+            return comparison
+            
+        except Exception as e:
+            logger.error(f"❌ Error comparing model experiments: {e}")
+            return {}
+    
+    def get_experiment_analytics(self) -> Dict[str, Any]:
+        """Get comprehensive experiment analytics"""
+        try:
+            # Get all experiments
+            experiments = self.client.search_experiments()
+            
+            analytics = {
+                "total_experiments": len(experiments),
+                "model_experiments": {},
+                "overall_stats": {
+                    "total_runs": 0,
+                    "successful_runs": 0,
+                    "failed_runs": 0
+                }
+            }
+            
+            for exp in experiments:
+                if exp.name.startswith("security_") and exp.name.endswith("_experiments"):
+                    model_name = exp.name.replace("security_", "").replace("_experiments", "")
+                    
+                    runs = self.client.search_runs(
+                        experiment_ids=[exp.experiment_id],
+                        order_by=["start_time DESC"]
+                    )
+                    
+                    successful_runs = sum(1 for run in runs if run.info.status == RunStatus.FINISHED)
+                    failed_runs = sum(1 for run in runs if run.info.status == RunStatus.FAILED)
+                    
+                    analytics["model_experiments"][model_name] = {
+                        "experiment_id": exp.experiment_id,
+                        "total_runs": len(runs),
+                        "successful_runs": successful_runs,
+                        "failed_runs": failed_runs,
+                        "success_rate": successful_runs / len(runs) if runs else 0
+                    }
+                    
+                    analytics["overall_stats"]["total_runs"] += len(runs)
+                    analytics["overall_stats"]["successful_runs"] += successful_runs
+                    analytics["overall_stats"]["failed_runs"] += failed_runs
+            
+            # Calculate overall success rate
+            total_runs = analytics["overall_stats"]["total_runs"]
+            if total_runs > 0:
+                analytics["overall_stats"]["success_rate"] = (
+                    analytics["overall_stats"]["successful_runs"] / total_runs
+                )
+            
+            return analytics
+            
+        except Exception as e:
+            logger.error(f"❌ Error getting experiment analytics: {e}")
+            return {}
 
 # Global instance
 mlflow_integration = MLflowIntegration()

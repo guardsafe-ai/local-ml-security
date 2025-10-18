@@ -123,6 +123,13 @@ class DataAugmenter:
                 
                 # Only add if different from original
                 if augmented_text != text:
+                    # Debug: Check for empty text or label
+                    if not augmented_text or not augmented_text.strip():
+                        logger.warning(f"⚠️ [AUGMENTATION] Generated empty text for label '{label}'")
+                        continue
+                    if not label or not str(label).strip():
+                        logger.error(f"❌ [AUGMENTATION] Empty label '{label}' for text '{augmented_text[:50]}...'")
+                        continue
                     augmented_samples.append((augmented_text, label))
             
             return augmented_samples
@@ -408,8 +415,20 @@ class DataAugmenter:
                         
                         if augmented_samples:
                             aug_text, aug_label = augmented_samples[0]
+                            # Debug: Check for empty values
+                            if not aug_text or not aug_text.strip():
+                                logger.warning(f"⚠️ [BALANCE] Empty augmented text for label '{label}'")
+                                continue
+                            if not aug_label or not str(aug_label).strip():
+                                logger.error(f"❌ [BALANCE] Empty augmented label for text '{aug_text[:50]}...'")
+                                continue
                             balanced_texts.append(aug_text)
                             balanced_labels.append(aug_label)
+                        else:
+                            # If no augmentation was generated, add the original sample again
+                            logger.warning(f"⚠️ [BALANCE] No augmentation generated for label '{label}', adding original")
+                            balanced_texts.append(random_text)
+                            balanced_labels.append(label)
             
             logger.info(f"Balanced dataset: {len(texts)} -> {len(balanced_texts)} samples")
             

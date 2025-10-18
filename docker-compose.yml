@@ -115,11 +115,12 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '6.0'
-          memory: 6G
+          cpus: '4.0'
+          memory: 4G
         reservations:
-          cpus: '2.0'
-          memory: 2G
+          cpus: '1.0'
+          memory: 1G
+    command: ["nice", "-n", "10", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8002"]
     networks:
       - ml-network
 
@@ -134,25 +135,25 @@ services:
       - REDIS_URL=redis://redis:6379
       - MLFLOW_TRACKING_URI=http://mlflow:5000
       - JAEGER_AGENT_HOST=jaeger
+      - JAEGER_AGENT_PORT=14268
       - AWS_ACCESS_KEY_ID=minioadmin
       - AWS_SECRET_ACCESS_KEY=minioadmin
       - MLFLOW_S3_ENDPOINT_URL=http://minio:9000
-      - JAEGER_AGENT_PORT=14268
       - NVIDIA_VISIBLE_DEVICES=all
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
     depends_on:
       - redis
       - mlflow
       - jaeger
     volumes:
       - ./services/model-api:/app
-    deploy:
-      resources:
-        limits:
-          cpus: '4.0'
-          memory: 8G
-        reservations:
-          cpus: '2.0'
-          memory: 4G
     networks:
       - ml-network
 
@@ -167,9 +168,16 @@ services:
     environment:
       - REDIS_URL=redis://redis:6379
       - MLFLOW_TRACKING_URI=http://mlflow:5000
+      # MinIO configuration for MLflow artifact access
+      - MINIO_URL=http://minio:9000
+      - AWS_ACCESS_KEY_ID=minioadmin
+      - AWS_SECRET_ACCESS_KEY=minioadmin
+      - AWS_DEFAULT_REGION=us-east-1
+      - MLFLOW_S3_ENDPOINT_URL=http://minio:9000
     depends_on:
       - redis
       - mlflow
+      - minio
     volumes:
       - ./data/cache:/app/cache
     networks:
@@ -327,52 +335,104 @@ services:
     networks:
       - ml-network
 
-  # Enterprise Dashboard
+  # Enterprise Dashboard Backend (API Gateway)
   enterprise-dashboard-backend:
     build:
       context: ./services/enterprise-dashboard/backend
       dockerfile: Dockerfile
     container_name: enterprise-dashboard-backend
     ports:
-      - "8007:8005"
+      - "8007:8007"
     environment:
+      # Service URLs for the modular API clients
+      - MODEL_API_URL=http://model-api:8000
+      - TRAINING_URL=http://training:8002
+      - MODEL_CACHE_URL=http://model-cache:8003
+      - BUSINESS_METRICS_URL=http://business-metrics:8004
+      - ANALYTICS_URL=http://analytics:8006
+      - DATA_PRIVACY_URL=http://data-privacy:8005
+      - TRACING_URL=http://tracing:8009
+      - MLFLOW_URL=http://mlflow:5000
+      # Database and cache connections
       - REDIS_URL=redis://redis:6379
       - POSTGRES_URL=postgresql://mlflow:password@postgres:5432/ml_security_consolidated
-    volumes:
-      - ./services/enterprise-dashboard/backend:/app
+      # Jaeger tracing
+      - JAEGER_AGENT_HOST=jaeger
+      - JAEGER_AGENT_PORT=14268
+      # MinIO configuration
+      - MINIO_URL=http://minio:9000
+      - AWS_ACCESS_KEY_ID=minioadmin
+      - AWS_SECRET_ACCESS_KEY=minioadmin
+      - MLFLOW_S3_ENDPOINT_URL=http://minio:9000
     depends_on:
+      - model-api
+      - training
+      - model-cache
+      - business-metrics
+      - analytics
+      - data-privacy
+      - tracing
+      - mlflow
       - redis
       - postgres
-      - training
-      - model-api
-      # - red-team
-      - analytics
-      - mlflow
+      - jaeger
       - minio
+    volumes:
+      - ./services/enterprise-dashboard/backend:/app
+      - ./data/enterprise_dashboard:/app/data
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 4G
+        reservations:
+          cpus: '1.0'
+          memory: 2G
     networks:
       - ml-network
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8005/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8007/health"]
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 30s
 
-  enterprise-dashboard-frontend:
-    build:
-      context: ./services/enterprise-dashboard/frontend
-      dockerfile: Dockerfile.new
-    container_name: enterprise-dashboard-frontend
-    ports:
-      - "3000:3000"
-    environment:
-      - REACT_APP_API_URL=http://enterprise-dashboard-backend:8005
-      - REACT_APP_WS_URL=ws://enterprise-dashboard-backend:8005/ws
-    depends_on:
-      - enterprise-dashboard-backend
-    networks:
-      - ml-network
-    restart: unless-stopped
+  # Enterprise Dashboard Frontend (Direct Service Integration) - COMMENTED OUT FOR TESTING
+  # enterprise-dashboard-frontend:
+  #   build:
+  #     context: ./services/enterprise-dashboard/frontend
+  #     dockerfile: Dockerfile
+  #   container_name: enterprise-dashboard-frontend
+  #   ports:
+  #     - "3000:3000"
+  #   environment:
+  #     # Backend API Gateway connection
+  #     - REACT_APP_BACKEND_URL=http://enterprise-dashboard-backend:8007
+  #     # Direct service connections (fallback)
+  #     - REACT_APP_MODEL_API_URL=http://model-api:8000
+  #     - REACT_APP_TRAINING_API_URL=http://training:8002
+  #     - REACT_APP_MODEL_CACHE_URL=http://model-cache:8003
+  #     - REACT_APP_BUSINESS_METRICS_URL=http://business-metrics:8004
+  #     - REACT_APP_ANALYTICS_URL=http://analytics:8006
+  #     - REACT_APP_DATA_PRIVACY_URL=http://data-privacy:8005
+  #     - REACT_APP_MONITORING_URL=http://monitoring:8006
+  #     - REACT_APP_TRACING_URL=http://tracing:8009
+  #     - REACT_APP_MLFLOW_URL=http://mlflow:5000
+  #     # WebSocket connections (direct to services with WebSocket support)
+  #     - REACT_APP_WS_URL=ws://model-api:8000/ws
+  #   depends_on:
+  #     - enterprise-dashboard-backend
+  #     - model-api
+  #     - training
+  #     - model-cache
+  #     - business-metrics
+  #     - analytics
+  #     - data-privacy
+  #     - mlflow
+  #   networks:
+  #     - ml-network
+  #   restart: unless-stopped
 
 volumes:
   postgres_data:

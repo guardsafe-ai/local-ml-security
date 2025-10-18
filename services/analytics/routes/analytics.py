@@ -16,6 +16,6 @@ analytics_service = AnalyticsService()
 async def get_performance_trends(days: int = 30):
     """Get performance trends over time"""
     try:
-        return analytics_service.get_performance_trends(days)
+        return await analytics_service.get_performance_trends(days)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

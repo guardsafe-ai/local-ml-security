@@ -46,6 +46,9 @@ from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTEN
 # Import dynamic batching
 from services.dynamic_batching import DynamicBatcher, BatchConfig
 
+# Import smart batching
+from services.smart_batching import SmartBatcher, SmartBatchConfig, BatchingStrategy
+
 # Import audit logging
 from services.audit_logger import AuditLogger, AuditEventType, AuditSeverity
 
@@ -316,17 +319,22 @@ class PyTorchModel:
         self.quantized = False
         self.model_source = "Unknown"  # Will be set when model is loaded
         self.model_version = "Unknown"  # Will be set when model is loaded
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.size_mb = 0.0  # Model size in MB
+        self.memory_usage_mb = 0.0  # Memory usage in MB
     
     def load(self):
         """Load the model and tokenizer"""
         try:
+            import torch  # Import torch at the beginning of the method
+            from transformers import AutoTokenizer, AutoModelForSequenceClassification
+            
             # Check if this is an MLflow model URI
             if self.model_path.startswith("models:/"):
                 logger.info(f"🔄 [MLFLOW] Loading MLflow model: {self.model_path}")
                 import mlflow
                 import tempfile
                 import os
-                import torch
                 
                 # Download model from MLflow
                 with tempfile.TemporaryDirectory() as temp_dir:
@@ -394,6 +402,14 @@ class PyTorchModel:
             
             self.model.eval()
             
+            # Set model source and version
+            if self.model_path.startswith("models:/"):
+                self.model_source = "MLflow"
+                self.model_version = "trained"
+            else:
+                self.model_source = "Hugging Face"
+                self.model_version = "pre-trained"
+            
             # Auto-quantize model for 4x inference speedup
             try:
                 logger.info(f"🔧 [QUANTIZATION] Auto-quantizing {self.model_name} for faster inference...")
@@ -403,16 +419,19 @@ class PyTorchModel:
                 logger.warning(f"⚠️ [QUANTIZATION] Failed to quantize {self.model_name}: {e}")
                 # Continue without quantization if it fails
             
+            # Calculate model size and memory usage
+            self.size_mb = self._calculate_model_size()
+            self.memory_usage_mb = self._calculate_memory_usage()
+            
             self.loaded = True
-            logger.info(f"✅ [LOADED] PyTorch model: {self.model_name}")
+            logger.info(f"✅ [LOADED] PyTorch model: {self.model_name} (Size: {self.size_mb:.1f}MB, Memory: {self.memory_usage_mb:.1f}MB)")
         except Exception as e:
             from utils.enhanced_logging import get_model_api_logger
             logger_instance = get_model_api_logger("1.0.0")
             logger_instance.log_error_with_context(
                 error=e,
                 operation="load_pytorch_model",
-                model_name=self.model_name,
-                additional_context={"model_type": "pytorch", "device": str(self.device)}
+                additional_data={"model_name": self.model_name, "model_type": "pytorch", "device": str(self.device)}
             )
             self.loaded = False
     
@@ -632,6 +651,55 @@ class PyTorchModel:
         except Exception as e:
             logger.error(f"Error getting model insights for {self.model_name}: {e}")
             return {"error": str(e)}
+    
+    def _calculate_model_size(self) -> float:
+        """Calculate model size in MB"""
+        try:
+            if self.model is None:
+                return 0.0
+            
+            # Calculate size using the existing get_model_size_gb function
+            size_gb = get_model_size_gb(self.model_path, self.model_source, True, self.model_name)
+            if size_gb is not None:
+                return size_gb * 1024  # Convert GB to MB
+            else:
+                # Fallback: estimate based on model path
+                if "distilbert" in self.model_path.lower():
+                    return 250.0  # ~250MB
+                elif "bert-base" in self.model_path.lower():
+                    return 400.0  # ~400MB
+                elif "roberta" in self.model_path.lower():
+                    return 500.0  # ~500MB
+                elif "deberta" in self.model_path.lower():
+                    return 600.0  # ~600MB
+                else:
+                    return 300.0  # Default estimate
+        except Exception as e:
+            logger.warning(f"Could not calculate model size for {self.model_name}: {e}")
+            return 0.0
+    
+    def _calculate_memory_usage(self) -> float:
+        """Calculate current memory usage in MB"""
+        try:
+            if self.model is None:
+                return 0.0
+            
+            # Get model parameters count
+            total_params = sum(p.numel() for p in self.model.parameters())
+            
+            # Estimate memory usage (4 bytes per parameter for float32)
+            memory_bytes = total_params * 4
+            
+            # Convert to MB
+            memory_mb = memory_bytes / (1024 * 1024)
+            
+            # Add some overhead for activations and other tensors
+            memory_mb *= 1.5
+            
+            return memory_mb
+        except Exception as e:
+            logger.warning(f"Could not calculate memory usage for {self.model_name}: {e}")
+            return 0.0
 
 class SklearnModel:
     """Wrapper for scikit-learn models"""
@@ -812,11 +880,6 @@ class ModelManager:
     async def _mlflow_operation(self, operation: Callable, *args, **kwargs):
         """Execute MLflow operation with circuit breaker protection"""
         return await self._circuit_breakers["mlflow"].call(operation, *args, **kwargs)
-        
-        # Models will be loaded on-demand when needed
-        # self._load_models()
-        
-        # Preloading will be started in the FastAPI startup event
     
     def update_progress(self, model_name: str, status: str, progress: int = 0, message: str = "", details: dict = None):
         """Update loading progress for a model with detailed ML pipeline information"""
@@ -1386,10 +1449,10 @@ class ModelManager:
                 self.enhanced_logger.log_error_with_context(
                     error=e,
                     operation=f"predict_single_{model_name}",
-                    service_name="model-api",
-                    request_id=request_id,
-                    model_name=model_name,
-                    additional_context={
+                    additional_data={
+                        "service_name": "model-api",
+                        "request_id": request_id,
+                        "model_name": model_name,
                         "text_length": len(text),
                         "processing_time_ms": processing_time_ms,
                         "model_loaded": model.loaded if model else False
@@ -1411,10 +1474,10 @@ class ModelManager:
             self.enhanced_logger.log_error_with_context(
                 error=e,
                 operation=f"predict_single_{model_name}",
-                service_name="model-api",
-                request_id=request_id,
-                model_name=model_name,
-                additional_context={
+                additional_data={
+                    "service_name": "model-api",
+                    "request_id": request_id,
+                    "model_name": model_name,
                     "text_length": len(text),
                     "processing_time_ms": processing_time_ms,
                     "validation_failed": True
@@ -2069,6 +2132,12 @@ class ModelManager:
         except Exception as e:
             logger.error(f"Error loading trained model {model_name}: {e}")
             return None
+    
+    def initialize_models(self):
+        """Initialize all models at startup"""
+        logger.info("🔄 [INIT] Loading all models at startup...")
+        self._load_models()
+        logger.info("✅ [INIT] Model loading completed")
 
 # FastAPI application
 app = FastAPI(title="Model API Service", version="1.0.0")
@@ -2093,7 +2162,7 @@ app.add_middleware(TracingMiddleware)
 # Add performance monitoring middleware
 app.add_middleware(PerformanceMonitoringMiddleware)
 
-# Add audit logging middleware
+# Add audit logging middleware - NOW SAFE AND NON-BLOCKING
 app.add_middleware(AuditLoggingMiddleware, audit_logger=audit_logger)
 
 # Set up distributed tracing
@@ -2143,6 +2212,10 @@ app.include_router(health_router)
 # Global model manager
 model_manager = ModelManager()
 
+# Batching configuration - can be controlled via environment variables
+ENABLE_DYNAMIC_BATCHING = os.getenv("ENABLE_DYNAMIC_BATCHING", "false").lower() == "true"
+BATCHING_STRATEGY = os.getenv("BATCHING_STRATEGY", "single_request")  # single_request, batch_optimized, adaptive
+
 # Initialize dynamic batcher for efficient inference
 batch_config = BatchConfig(
     max_batch_size=8,
@@ -2151,8 +2224,66 @@ batch_config = BatchConfig(
     max_queue_size=100
 )
 
+# Initialize smart batcher for intelligent batching decisions
+smart_batch_config = SmartBatchConfig(
+    max_batch_size=16,
+    max_wait_time_ms=100,
+    min_batch_size=2,
+    enable_adaptive=True,
+    load_threshold=0.7,
+    latency_threshold_ms=200
+)
+
 async def batch_inference_function(texts: List[str], batch_requests: List) -> List[Dict[str, Any]]:
-    """Inference function for dynamic batching"""
+    """Inference function for dynamic batching - processes multiple requests efficiently"""
+    try:
+        logger.info(f"🔄 [BATCH] Processing {len(texts)} texts in parallel")
+        
+        # Process all requests in parallel using asyncio.gather
+        tasks = []
+        for i, text in enumerate(texts):
+            req = batch_requests[i] if i < len(batch_requests) else {}
+            models = req.metadata.get("models", []) if req.metadata else []
+            ensemble = req.metadata.get("ensemble", False) if req.metadata else False
+            start_time = req.metadata.get("start_time", time.time()) if req.metadata else time.time()
+            
+            # Create task for individual prediction
+            task = _execute_prediction(text, models, ensemble, start_time, True)
+            tasks.append(task)
+        
+        # Execute all predictions in parallel
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Process results and handle any exceptions
+        processed_results = []
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.error(f"❌ [BATCH] Error processing text {i}: {result}")
+                processed_results.append({
+                    "text": texts[i],
+                    "prediction": "error",
+                    "confidence": 0.0,
+                    "error": str(result),
+                    "probabilities": {},
+                    "model_predictions": {},
+                    "ensemble_used": False,
+                    "processing_time_ms": 0,
+                    "from_cache": False,
+                    "timestamp": time.time()
+                })
+            else:
+                processed_results.append(result)
+        
+        logger.info(f"✅ [BATCH] Processed {len(processed_results)} predictions in parallel")
+        return processed_results
+                
+    except Exception as e:
+        logger.error(f"❌ [BATCH] Batch inference failed: {e}")
+        # Fallback to individual predictions
+        return await _fallback_individual_predictions(texts, batch_requests)
+
+async def _fallback_individual_predictions(texts: List[str], batch_requests: List) -> List[Dict[str, Any]]:
+    """Fallback to individual predictions if batch fails"""
     results = []
     
     for i, text in enumerate(texts):
@@ -2167,11 +2298,18 @@ async def batch_inference_function(texts: List[str], batch_requests: List) -> Li
             results.append(result)
             
         except Exception as e:
-            logger.error(f"❌ [BATCH] Error processing text {i}: {e}")
+            logger.error(f"❌ [BATCH FALLBACK] Error processing text {i}: {e}")
             results.append({
+                "text": text,
                 "prediction": "error",
                 "confidence": 0.0,
-                "error": str(e)
+                "error": str(e),
+                "probabilities": {},
+                "model_predictions": {},
+                "ensemble_used": False,
+                "processing_time_ms": 0,
+                "from_cache": False,
+                "timestamp": time.time()
             })
     
     return results
@@ -2202,6 +2340,10 @@ async def startup_event():
     except Exception as e:
         logger.error(f"❌ Failed to initialize HTTP client: {e}")
     
+    # Models will be loaded on-demand via Model Cache Service
+    # No preloading in Model API - delegate to Model Cache
+    logger.info("✅ Model API ready - models will be loaded on-demand via Model Cache")
+    
     # Initialize prediction logger
     try:
         await prediction_logger.initialize()
@@ -2209,12 +2351,8 @@ async def startup_event():
     except Exception as e:
         logger.error(f"❌ Failed to initialize prediction logger: {e}")
     
-    # Start background model preloading
-    try:
-        asyncio.create_task(model_manager._start_preloading())
-        logger.info("🔄 Model preloading started in background")
-    except Exception as e:
-        logger.error(f"❌ Failed to start model preloading: {e}")
+    # Model preloading handled by Model Cache Service
+    logger.info("🔄 Model preloading delegated to Model Cache Service")
     
     # Note: Service info will be updated later with comprehensive metrics
     
@@ -2311,42 +2449,6 @@ async def clear_query_metrics():
         logger.error(f"Error clearing query metrics: {e}")
         return {"error": str(e)}
 
-@app.post("/test-predict")
-async def test_predict(request: PredictionRequest):
-    """Simple test prediction endpoint"""
-    try:
-        # Simple test without complex model manager
-        return {
-            "text": request.text,
-            "prediction": "prompt_injection",
-            "confidence": 0.95,
-            "probabilities": {
-                "prompt_injection": 0.95,
-                "jailbreak": 0.02,
-                "system_extraction": 0.01,
-                "code_injection": 0.01,
-                "benign": 0.01
-            },
-            "model_predictions": {
-                "test_model": {
-                    "prediction": "prompt_injection",
-                    "confidence": 0.95,
-                    "probabilities": {
-                        "prompt_injection": 0.95,
-                        "jailbreak": 0.02,
-                        "system_extraction": 0.01,
-                        "code_injection": 0.01,
-                        "benign": 0.01
-                    }
-                }
-            },
-            "ensemble_used": False,
-            "processing_time_ms": 10.0,
-            "timestamp": datetime.now().isoformat()
-        }
-    except Exception as e:
-        logger.error(f"Error in test prediction: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/models")
 async def list_models():
@@ -2366,23 +2468,23 @@ async def list_models():
                 trained_loaded = trained_name in model_manager.models
                 
                 # Get model info
-                pretrained_info = model_manager.models.get(pretrained_name, {})
-                trained_info = model_manager.models.get(trained_name, {})
+                pretrained_model = model_manager.models.get(pretrained_name)
+                trained_model = model_manager.models.get(trained_name)
                 
                 models[base_model_name] = {
                     "pretrained": {
                         "name": pretrained_name,
                         "loaded": pretrained_loaded,
-                        "version": pretrained_info.get("version", "unknown"),
-                        "size_mb": pretrained_info.get("size_mb", 0),
-                        "memory_usage_mb": pretrained_info.get("memory_usage_mb", 0)
+                        "version": getattr(pretrained_model, 'model_version', 'unknown') if pretrained_model else 'unknown',
+                        "size_mb": getattr(pretrained_model, 'size_mb', 0) if pretrained_model else 0,
+                        "memory_usage_mb": getattr(pretrained_model, 'memory_usage_mb', 0) if pretrained_model else 0
                     },
                     "trained": {
                         "name": trained_name,
                         "loaded": trained_loaded,
-                        "version": trained_info.get("version", "unknown"),
-                        "size_mb": trained_info.get("size_mb", 0),
-                        "memory_usage_mb": trained_info.get("memory_usage_mb", 0)
+                        "version": getattr(trained_model, 'model_version', 'unknown') if trained_model else 'unknown',
+                        "size_mb": getattr(trained_model, 'size_mb', 0) if trained_model else 0,
+                        "memory_usage_mb": getattr(trained_model, 'memory_usage_mb', 0) if trained_model else 0
                     }
                 }
             except Exception as e:
@@ -2401,6 +2503,154 @@ async def list_models():
     except Exception as e:
         logger.error(f"Error listing models: {e}")
         return {"error": str(e)}
+
+@app.get("/models/status")
+async def get_models_status():
+    """Get overall status of all models"""
+    try:
+        models = {}
+        loaded_count = 0
+        total_count = 0
+        
+        # Get pretrained models status
+        for model_name, model in model_manager.models.items():
+            if not model_name.endswith("_trained"):
+                total_count += 1
+                if model.loaded:
+                    loaded_count += 1
+                
+                models[model_name] = {
+                    "name": model_name,
+                    "loaded": model.loaded,
+                    "type": "pretrained",
+                    "status": "loaded" if model.loaded else "unloaded",
+                    "memory_usage_mb": getattr(model, 'memory_usage_mb', 0),
+                    "device": str(model.device) if hasattr(model, 'device') else "unknown"
+                }
+        
+        # Get trained models status from MLflow
+        try:
+            client = MLflowClient()
+            registered_models = client.search_registered_models()
+            
+            for rm in registered_models:
+                model_name = rm.name.replace("security_", "")
+                total_count += 1
+                
+                # Check if trained model is loaded in cache
+                cache_loaded = False
+                try:
+                    client = await get_http_client()
+                    response = await client.get(
+                        f"{model_manager.model_cache_url}/models/{model_name}_trained/status",
+                        timeout=5.0
+                    )
+                    if response.status_code == 200:
+                        cache_data = response.json()
+                        cache_loaded = cache_data.get("loaded", False)
+                except Exception:
+                    pass
+                
+                if cache_loaded:
+                    loaded_count += 1
+                
+                models[f"{model_name}_trained"] = {
+                    "name": f"{model_name}_trained",
+                    "loaded": cache_loaded,
+                    "type": "trained",
+                    "status": "loaded" if cache_loaded else "unloaded",
+                    "memory_usage_mb": None,
+                    "device": "unknown"
+                }
+        except Exception as e:
+            logger.warning(f"Could not fetch trained models status: {e}")
+        
+        return {
+            "status": "healthy",
+            "total_models": total_count,
+            "loaded_models": loaded_count,
+            "unloaded_models": total_count - loaded_count,
+            "models": models,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting models status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/models/{model_name}/status")
+async def get_model_status(model_name: str):
+    """Get status of a specific model"""
+    try:
+        # Check if it's a pretrained model
+        if model_name in model_manager.models:
+            model = model_manager.models[model_name]
+            return {
+                "name": model_name,
+                "loaded": model.loaded,
+                "type": "pretrained",
+                "status": "loaded" if model.loaded else "unloaded",
+                "memory_usage_mb": getattr(model, 'memory_usage_mb', 0),
+                "device": str(model.device) if hasattr(model, 'device') else "unknown",
+                "last_used": model.last_used.isoformat() if hasattr(model, 'last_used') and model.last_used else None,
+                "quantized": getattr(model, 'quantized', False),
+                "version": getattr(model, 'version', 'unknown'),
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        # Check if it's a trained model
+        elif model_name.endswith("_trained"):
+            base_name = model_name.replace("_trained", "")
+            try:
+                # Check MLflow for the model
+                client = MLflowClient()
+                model_versions = client.get_latest_versions(f"security_{base_name}", stages=["None", "Staging", "Production"])
+                
+                if model_versions:
+                    lv = model_versions[0]
+                    
+                    # Check if loaded in cache
+                    cache_loaded = False
+                    try:
+                        client = await get_http_client()
+                        response = await client.get(
+                            f"{model_manager.model_cache_url}/models/{model_name}/status",
+                            timeout=5.0
+                        )
+                        if response.status_code == 200:
+                            cache_data = response.json()
+                            cache_loaded = cache_data.get("loaded", False)
+                    except Exception:
+                        pass
+                    
+                    return {
+                        "name": model_name,
+                        "loaded": cache_loaded,
+                        "type": "trained",
+                        "status": "loaded" if cache_loaded else "unloaded",
+                        "memory_usage_mb": None,
+                        "device": "unknown",
+                        "last_used": None,
+                        "quantized": False,
+                        "version": lv.version,
+                        "stage": lv.current_stage,
+                        "mlflow_uri": f"models:/security_{base_name}/{lv.version}",
+                        "timestamp": datetime.now().isoformat()
+                    }
+                else:
+                    raise HTTPException(status_code=404, detail=f"Trained model {model_name} not found in MLflow")
+            except Exception as e:
+                logger.error(f"Error checking trained model {model_name}: {e}")
+                raise HTTPException(status_code=404, detail=f"Trained model {model_name} not found")
+        
+        else:
+            raise HTTPException(status_code=404, detail=f"Model {model_name} not found")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting model status for {model_name}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/models/{model_name}")
 async def get_model_info(model_name: str):
@@ -2607,25 +2857,49 @@ async def predict(request: PredictionRequest):
         except Exception as e:
             logger.debug(f"Failed to record sanitization metrics: {e}")
         
-        # Use dynamic batching for better throughput
+        # Use dynamic batching for optimal ML inference performance
+        # Intelligent request processing based on configuration and system state
         try:
-            result = await dynamic_batcher.add_request(
-                text=sanitized_text,
-                request_id=f"req_{int(time.time() * 1000)}",
-                metadata={
-                    "models": request.models,
-                    "ensemble": request.ensemble,
-                    "start_time": start_time
-                }
-            )
+            if ENABLE_DYNAMIC_BATCHING and BATCHING_STRATEGY != "single_request":
+                # Use smart batching for optimal performance
+                logger.info(f"🔄 [SMART BATCHING] Processing request with {BATCHING_STRATEGY} strategy")
+                
+                # Initialize smart batcher if not already done
+                if not hasattr(app.state, 'smart_batcher'):
+                    app.state.smart_batcher = SmartBatcher(smart_batch_config, batch_inference_function)
+                
+                # Determine strategy
+                strategy = BatchingStrategy.SINGLE_REQUEST
+                if BATCHING_STRATEGY == "batch_optimized":
+                    strategy = BatchingStrategy.BATCH_OPTIMIZED
+                elif BATCHING_STRATEGY == "adaptive":
+                    strategy = BatchingStrategy.ADAPTIVE
+                
+                result = await app.state.smart_batcher.add_request(
+                    text=sanitized_text,
+                    request_id=f"req_{int(time.time() * 1000)}",
+                    strategy=strategy,
+                    metadata={
+                        "models": request.models,
+                        "ensemble": request.ensemble,
+                        "start_time": start_time,
+                        "return_probabilities": request.return_probabilities
+                    }
+                )
+                logger.info(f"✅ [SMART BATCHING] Completed request in {result.get('processing_time_ms', 0):.2f}ms")
+            else:
+                # Use direct prediction for optimal latency (default behavior)
+                logger.info(f"🔄 [DIRECT] Processing single request directly for optimal latency")
+                prediction_timeout = 30  # 30 seconds timeout
+                result = await asyncio.wait_for(
+                    _execute_prediction(sanitized_text, request.models, request.ensemble, start_time, request.return_probabilities),
+                    timeout=prediction_timeout
+                )
+                logger.info(f"✅ [DIRECT] Completed single request in {result.get('processing_time_ms', 0):.2f}ms")
+                
         except Exception as e:
-            logger.warning(f"⚠️ Dynamic batching failed, falling back to direct prediction: {e}")
-            # Fallback to direct prediction
-            prediction_timeout = 30  # 30 seconds timeout
-            result = await asyncio.wait_for(
-                _execute_prediction(sanitized_text, request.models, request.ensemble, start_time, request.return_probabilities),
-                timeout=prediction_timeout
-            )
+            logger.error(f"❌ [PREDICTION] Request processing failed: {e}")
+            raise HTTPException(status_code=500, detail=f"Prediction failed: {str(e)}")
         
         # Record business metrics
         try:
@@ -2662,6 +2936,10 @@ async def predict(request: PredictionRequest):
             logger.debug(f"💾 [DEDUPLICATION] Stored response for future deduplication")
         except Exception as e:
             logger.warning(f"⚠️ [DEDUPLICATION] Failed to store response: {e}")
+        
+        # Debug: Log result structure
+        # Log successful prediction completion
+        logger.info(f"✅ [PREDICTION] Completed prediction successfully")
         
         return result
         
@@ -2853,28 +3131,22 @@ async def _execute_prediction(text: str, models: List[str], ensemble: bool, star
                 model_name = available_models[0]
                 logger.info(f"🎯 [AUTO SELECT] Using best available model: {model_name}")
         else:
-            # Use best available model
-            available_models = model_manager.get_available_models()
-            if not available_models:
-                raise HTTPException(status_code=503, detail="No models available")
-            model_name = available_models[0]
-            logger.info(f"🎯 [AUTO SELECT] Using best available model: {model_name}")
+            # No specific models requested - use Model Cache Service with default model
+            logger.info(f"🎯 [AUTO SELECT] No models specified, using Model Cache Service with default model")
             
-            # Get model info for logging
-            if model_name in model_manager.models:
-                model_info = model_manager.models[model_name]
-                logger.info(f"📊 [MODEL INFO] Model: {model_name}")
-                logger.info(f"📍 [MODEL PATH] Path: {getattr(model_info, 'model_path', 'Unknown')}")
-                logger.info(f"🏷️ [MODEL SOURCE] Source: {getattr(model_info, 'model_source', 'Unknown')}")
-                logger.info(f"📈 [MODEL VERSION] Version: {getattr(model_info, 'model_version', 'Unknown')}")
-                logger.info(f"✅ [MODEL LOADED] Loaded: {getattr(model_info, 'loaded', False)}")
-            
-            logger.info(f"🔮 [PREDICTING] Making prediction with {model_name}...")
-            result = model_manager.predict_single(text=text, model_name=model_name)
-            # Create a copy of result to avoid circular reference
-            result_copy = result.copy()
-            result["model_predictions"] = {model_name: result_copy}
-            result["ensemble_used"] = False
+            # Try Model Cache Service with default model (distilbert)
+            cache_result = await model_manager._predict_with_cache(text, ["distilbert"])
+            if cache_result:
+                result = cache_result
+                logger.info(f"✅ [CACHE HIT] Got prediction from Model Cache Service")
+            else:
+                # Fallback: try with any available model from cache
+                cache_result = await model_manager._predict_with_cache(text, [])
+                if cache_result:
+                    result = cache_result
+                    logger.info(f"✅ [CACHE FALLBACK] Got prediction from Model Cache Service")
+                else:
+                    raise HTTPException(status_code=503, detail="No models available in Model Cache Service")
             
             logger.info(f"✅ [PREDICTION RESULT] Prediction: {result.get('prediction', 'Unknown')}")
             logger.info(f"📊 [CONFIDENCE] Confidence: {result.get('confidence', 0.0)}")
@@ -2982,38 +3254,6 @@ async def _execute_prediction(text: str, models: List[str], ensemble: bool, star
         logger.error(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/predict/batch")
-async def predict_batch(texts: List[str], models: Optional[List[str]] = None, ensemble: bool = True):
-    """Make predictions on multiple texts"""
-    try:
-        results = []
-        
-        for text in texts:
-            try:
-                request = PredictionRequest(
-                    text=text,
-                    models=models,
-                    ensemble=ensemble,
-                    return_probabilities=True
-                )
-                result = await predict(request)
-                results.append(result.dict())
-            except Exception as e:
-                results.append({
-                    "text": text,
-                    "error": str(e),
-                    "timestamp": datetime.now().isoformat()
-                })
-        
-        return {
-            "results": results,
-            "total_texts": len(texts),
-            "successful_predictions": len([r for r in results if "error" not in r])
-        }
-        
-    except Exception as e:
-        logger.error(f"Error making batch predictions: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/predict/trained")
 async def predict_trained(request: PredictionRequest):
@@ -3045,13 +3285,26 @@ async def predict_trained(request: PredictionRequest):
         result = await model_manager._predict_trained_model(request.text, model_name)
         
         if result:
-            return result
+            # Return simplified response to avoid serialization issues
+            return {
+                "status": "success",
+                "text": result.get("text", request.text),
+                "prediction": result.get("prediction", "unknown"),
+                "confidence": result.get("confidence", 0.0),
+                "probabilities": result.get("probabilities", {}),
+                "model_name": model_name,
+                "processing_time_ms": result.get("processing_time_ms", 0),
+                "from_cache": result.get("from_cache", False),
+                "timestamp": result.get("timestamp", time.time())
+            }
         else:
             raise HTTPException(status_code=503, detail=f"Failed to load trained model {model_name}")
             
     except Exception as e:
         logger.error(f"Error in trained model prediction: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
 
 @app.post("/models/{model_name}/reload")
 async def reload_model(model_name: str):
@@ -3074,6 +3327,92 @@ async def get_model_progress(model_name: str):
     except Exception as e:
         logger.error(f"Error getting progress for {model_name}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/batching/stats")
+async def get_batching_stats():
+    """Get dynamic batching statistics and configuration"""
+    try:
+        stats = {
+            "enabled": ENABLE_DYNAMIC_BATCHING,
+            "strategy": BATCHING_STRATEGY,
+            "configuration": {
+                "max_batch_size": batch_config.max_batch_size,
+                "max_wait_time_ms": batch_config.max_wait_time_ms,
+                "min_batch_size": batch_config.min_batch_size,
+                "max_queue_size": batch_config.max_queue_size
+            },
+            "smart_batching_config": {
+                "max_batch_size": smart_batch_config.max_batch_size,
+                "max_wait_time_ms": smart_batch_config.max_wait_time_ms,
+                "min_batch_size": smart_batch_config.min_batch_size,
+                "enable_adaptive": smart_batch_config.enable_adaptive,
+                "load_threshold": smart_batch_config.load_threshold,
+                "latency_threshold_ms": smart_batch_config.latency_threshold_ms
+            }
+        }
+        
+        # Add smart batcher stats if available
+        if hasattr(app.state, 'smart_batcher'):
+            stats["smart_batcher_stats"] = app.state.smart_batcher.get_stats()
+        
+        # Add dynamic batcher stats
+        if hasattr(app.state, 'dynamic_batcher'):
+            stats["dynamic_batcher_stats"] = app.state.dynamic_batcher.get_stats()
+            
+        return stats
+        
+    except Exception as e:
+        logger.error(f"Error getting batching stats: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get batching stats: {str(e)}")
+
+@app.post("/batching/configure")
+async def configure_batching(
+    enable: bool = None,
+    strategy: str = None,
+    max_batch_size: int = None,
+    max_wait_time_ms: int = None
+):
+    """Configure dynamic batching settings (runtime configuration)"""
+    try:
+        global ENABLE_DYNAMIC_BATCHING, BATCHING_STRATEGY
+        
+        if enable is not None:
+            ENABLE_DYNAMIC_BATCHING = enable
+            logger.info(f"Dynamic batching {'enabled' if enable else 'disabled'}")
+            
+        if strategy is not None:
+            if strategy not in ["single_request", "batch_optimized", "adaptive"]:
+                raise HTTPException(status_code=400, detail="Invalid strategy. Must be: single_request, batch_optimized, or adaptive")
+            BATCHING_STRATEGY = strategy
+            logger.info(f"Batching strategy changed to: {strategy}")
+            
+        if max_batch_size is not None:
+            if max_batch_size < 1 or max_batch_size > 100:
+                raise HTTPException(status_code=400, detail="max_batch_size must be between 1 and 100")
+            batch_config.max_batch_size = max_batch_size
+            logger.info(f"Max batch size changed to: {max_batch_size}")
+            
+        if max_wait_time_ms is not None:
+            if max_wait_time_ms < 10 or max_wait_time_ms > 5000:
+                raise HTTPException(status_code=400, detail="max_wait_time_ms must be between 10 and 5000")
+            batch_config.max_wait_time_ms = max_wait_time_ms
+            logger.info(f"Max wait time changed to: {max_wait_time_ms}ms")
+        
+        return {
+            "status": "success",
+            "message": "Batching configuration updated",
+            "current_config": {
+                "enabled": ENABLE_DYNAMIC_BATCHING,
+                "strategy": BATCHING_STRATEGY,
+                "max_batch_size": batch_config.max_batch_size,
+                "max_wait_time_ms": batch_config.max_wait_time_ms
+            },
+            "timestamp": time.time()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error configuring batching: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to configure batching: {str(e)}")
 
 @app.post("/load")
 async def load_model(request: Dict[str, Any]):
@@ -3242,33 +3581,6 @@ async def get_quantization_status(model_name: str):
         logger.error(f"Error getting quantization status for {model_name}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/models/{model_name}/quantization/benchmark")
-async def benchmark_quantization(model_name: str, input_text: str = "This is a test prompt injection attempt"):
-    """Benchmark original vs quantized model performance"""
-    try:
-        if model_name not in model_manager.models:
-            raise HTTPException(status_code=404, detail=f"Model {model_name} not found")
-        
-        model = model_manager.models[model_name]
-        if not model.loaded:
-            raise HTTPException(status_code=400, detail=f"Model {model_name} not loaded")
-        
-        if not getattr(model, 'quantized', False):
-            raise HTTPException(status_code=400, detail=f"Model {model_name} not quantized")
-        
-        results = model.benchmark_quantization(input_text)
-        
-        return {
-            "model_name": model_name,
-            "benchmark_results": results,
-            "timestamp": datetime.now().isoformat()
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error benchmarking quantization for {model_name}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/explain")
 async def explain_prediction_simple(request: ExplainRequest):

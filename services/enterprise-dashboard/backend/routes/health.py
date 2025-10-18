@@ -8,13 +8,13 @@ from datetime import datetime
 from typing import List
 from fastapi import APIRouter
 from models.responses import HealthResponse, ServiceHealth
-from services.api_client import APIClient
+from services.main_api_client import MainAPIClient
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # Initialize API client
-api_client = APIClient()
+api_client = MainAPIClient()
 
 
 @router.get("/", response_model=HealthResponse)
@@ -54,7 +54,33 @@ async def get_all_services_health():
     """Get health status of all ML Security services"""
     try:
         health_status = await api_client.get_all_services_health()
-        return [ServiceHealth(**service) for service in health_status]
+        
+        # Convert the health status dictionary to a list of ServiceHealth objects
+        service_health_list = []
+        if "services" in health_status:
+            for service_name, service_data in health_status["services"].items():
+                try:
+                    # Ensure we have the required fields for ServiceHealth
+                    service_health = ServiceHealth(
+                        name=service_name,
+                        status=service_data.get("status", "unknown"),
+                        response_time=service_data.get("response_time", 0.0),
+                        last_check=service_data.get("last_check", datetime.now()),
+                        details=service_data.get("details")
+                    )
+                    service_health_list.append(service_health)
+                except Exception as e:
+                    logger.error(f"Failed to create ServiceHealth for {service_name}: {e}")
+                    # Create a fallback ServiceHealth object
+                    service_health_list.append(ServiceHealth(
+                        name=service_name,
+                        status="error",
+                        response_time=0.0,
+                        last_check=datetime.now(),
+                        details={"error": str(e)}
+                    ))
+        
+        return service_health_list
     except Exception as e:
         logger.error(f"Failed to get services health: {e}")
         return []

@@ -23,8 +23,8 @@ WORKDIR /app
 
 # Copy requirements and install PyTorch with CUDA support
 COPY requirements.txt .
-RUN pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+RUN pip install -r requirements.txt
 
 # Stage 2: CPU-only fallback
 FROM python:3.9-slim AS cpu-base
@@ -41,8 +41,8 @@ RUN apt-get update && apt-get install -y \
 
 # Copy requirements and install CPU-only PyTorch
 COPY requirements.txt .
-RUN pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+RUN pip install -r requirements.txt
 
 # Stage 3: Final image - try CUDA first, fallback to CPU
 FROM cuda-base AS final

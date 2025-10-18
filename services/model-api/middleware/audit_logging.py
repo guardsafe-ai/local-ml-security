@@ -14,45 +14,13 @@ from starlette.types import ASGIApp
 
 logger = logging.getLogger(__name__)
 
-class AuditLogger:
-    """Log all model lifecycle events for compliance"""
-    
-    def __init__(self, db_manager=None):
-        self.db_manager = db_manager
-    
-    async def log_model_event(
-        self,
-        event_type: str,  # deployed, promoted, archived, rolled_back, loaded, unloaded
-        model_name: str,
-        version: str = None,
-        user_id: str = None,
-        ip_address: str = None,
-        metadata: Dict[str, Any] = None
-    ):
-        """Log model lifecycle event"""
-        
-        # Log to structured logger
-        logger.info(f"Model audit event: {event_type} - {model_name} v{version} by {user_id} at {datetime.now().isoformat()}")
-        
-        # Store in database if available
-        if self.db_manager:
-            try:
-                await self.db_manager.execute(
-                    """
-                    INSERT INTO model_audit_log 
-                    (event_type, model_name, version, user_id, ip_address, metadata, timestamp)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7)
-                    """,
-                    event_type, model_name, version, user_id, 
-                    ip_address, json.dumps(metadata or {}), datetime.now()
-                )
-            except Exception as e:
-                logger.error(f"Failed to store audit event in database: {e}")
+# Import the correct AuditLogger from services
+from services.audit_logger import AuditLogger as ServiceAuditLogger
 
 class AuditLoggingMiddleware(BaseHTTPMiddleware):
     """Middleware to automatically log model-related operations"""
     
-    def __init__(self, app: ASGIApp, audit_logger: AuditLogger):
+    def __init__(self, app: ASGIApp, audit_logger: ServiceAuditLogger):
         super().__init__(app)
         self.audit_logger = audit_logger
         logger.info("✅ AuditLoggingMiddleware initialized")
@@ -65,13 +33,20 @@ class AuditLoggingMiddleware(BaseHTTPMiddleware):
         # Process request
         response = await call_next(request)
         
-        # Log model-related operations
-        await self._log_model_operations(
-            request=request,
-            response=response,
-            user_id=user_id,
-            ip_address=ip_address
-        )
+        # Log model-related operations in background (non-blocking)
+        # This ensures audit logging never blocks the HTTP response
+        try:
+            # Use asyncio.create_task to run in background
+            import asyncio
+            asyncio.create_task(self._log_model_operations(
+                request=request,
+                response=response,
+                user_id=user_id,
+                ip_address=ip_address
+            ))
+        except Exception as e:
+            # Even if background logging fails, don't affect the response
+            logger.debug(f"Background audit logging failed: {e}")
         
         return response
     
@@ -82,110 +57,107 @@ class AuditLoggingMiddleware(BaseHTTPMiddleware):
         user_id: str, 
         ip_address: str
     ):
-        """Log model-related operations based on endpoint"""
+        """Log model-related operations based on endpoint - COMPLETELY NON-BLOCKING"""
         
-        path = request.url.path
-        method = request.method
-        
-        # Model loading operations
-        if path.startswith("/models/") and method == "POST":
-            if "load" in path:
-                await self._log_model_load(request, response, user_id, ip_address)
-            elif "unload" in path:
-                await self._log_model_unload(request, response, user_id, ip_address)
-            elif "reload" in path:
-                await self._log_model_reload(request, response, user_id, ip_address)
-        
-        # Prediction operations
-        elif path.startswith("/predict") and method == "POST":
-            await self._log_prediction(request, response, user_id, ip_address)
-        
-        # Model management operations
-        elif path.startswith("/models/") and method in ["PUT", "DELETE"]:
-            await self._log_model_management(request, response, user_id, ip_address)
+        try:
+            path = request.url.path
+            method = request.method
+            
+            # Model loading operations
+            if path.startswith("/models/") and method == "POST":
+                if "load" in path:
+                    await self._log_model_load(request, response, user_id, ip_address)
+                elif "unload" in path:
+                    await self._log_model_unload(request, response, user_id, ip_address)
+                elif "reload" in path:
+                    await self._log_model_reload(request, response, user_id, ip_address)
+            
+            # Prediction operations
+            elif path.startswith("/predict") and method == "POST":
+                await self._log_prediction(request, response, user_id, ip_address)
+        except Exception as e:
+            # Never let audit logging errors affect the application
+            logger.debug(f"Audit logging failed (non-critical): {e}")
     
     async def _log_model_load(self, request: Request, response: Response, user_id: str, ip_address: str):
-        """Log model loading events"""
+        """Log model loading events - SAFE AND NON-BLOCKING"""
         try:
             body = await request.json() if hasattr(request, 'json') else {}
             model_name = body.get("model_name", "unknown")
             version = body.get("version", "latest")
             
-            event_type = "loaded" if response.status_code == 200 else "load_failed"
-            
-            await self.audit_logger.log_model_event(
-                event_type=event_type,
-                model_name=model_name,
-                version=version,
+            from services.audit_logger import AuditEventType
+            await self.audit_logger.log_event(
+                event_type=AuditEventType.MODEL_LOAD,
                 user_id=user_id,
-                ip_address=ip_address,
-                metadata={
+                resource=f"model:{model_name}",
+                action="load",
+                details={
                     "endpoint": request.url.path,
                     "status_code": response.status_code,
-                    "method": request.method
+                    "method": request.method,
+                    "version": version
                 }
             )
         except Exception as e:
-            logger.error(f"Failed to log model load event: {e}")
+            # Never let audit logging errors affect the application
+            logger.debug(f"Model load audit logging failed (non-critical): {e}")
     
     async def _log_model_unload(self, request: Request, response: Response, user_id: str, ip_address: str):
-        """Log model unloading events"""
+        """Log model unloading events - SAFE AND NON-BLOCKING"""
         try:
             body = await request.json() if hasattr(request, 'json') else {}
             model_name = body.get("model_name", "unknown")
             
-            event_type = "unloaded" if response.status_code == 200 else "unload_failed"
-            
-            await self.audit_logger.log_model_event(
-                event_type=event_type,
-                model_name=model_name,
+            from services.audit_logger import AuditEventType
+            await self.audit_logger.log_event(
+                event_type=AuditEventType.MODEL_UNLOAD,
                 user_id=user_id,
-                ip_address=ip_address,
-                metadata={
+                resource=f"model:{model_name}",
+                action="unload",
+                details={
                     "endpoint": request.url.path,
                     "status_code": response.status_code,
                     "method": request.method
                 }
             )
         except Exception as e:
-            logger.error(f"Failed to log model unload event: {e}")
+            logger.debug(f"Model unload audit logging failed (non-critical): {e}")
     
     async def _log_model_reload(self, request: Request, response: Response, user_id: str, ip_address: str):
-        """Log model reload events"""
+        """Log model reload events - SAFE AND NON-BLOCKING"""
         try:
             model_name = request.path_params.get("model_name", "unknown")
             
-            event_type = "reloaded" if response.status_code == 200 else "reload_failed"
-            
-            await self.audit_logger.log_model_event(
-                event_type=event_type,
-                model_name=model_name,
+            from services.audit_logger import AuditEventType
+            await self.audit_logger.log_event(
+                event_type=AuditEventType.MODEL_LOAD,  # Use MODEL_LOAD for reload
                 user_id=user_id,
-                ip_address=ip_address,
-                metadata={
+                resource=f"model:{model_name}",
+                action="reload",
+                details={
                     "endpoint": request.url.path,
                     "status_code": response.status_code,
                     "method": request.method
                 }
             )
         except Exception as e:
-            logger.error(f"Failed to log model reload event: {e}")
+            logger.debug(f"Model reload audit logging failed (non-critical): {e}")
     
     async def _log_prediction(self, request: Request, response: Response, user_id: str, ip_address: str):
-        """Log prediction events"""
+        """Log prediction events - SAFE AND NON-BLOCKING"""
         try:
             body = await request.json() if hasattr(request, 'json') else {}
             models = body.get("models", [])
             text_length = len(body.get("text", ""))
             
-            event_type = "prediction_success" if response.status_code == 200 else "prediction_failed"
-            
-            await self.audit_logger.log_model_event(
-                event_type=event_type,
-                model_name=models[0] if models else "ensemble",
+            from services.audit_logger import AuditEventType
+            await self.audit_logger.log_event(
+                event_type=AuditEventType.MODEL_PREDICT,
                 user_id=user_id,
-                ip_address=ip_address,
-                metadata={
+                resource=f"model:{models[0] if models else 'ensemble'}",
+                action="predict",
+                details={
                     "endpoint": request.url.path,
                     "status_code": response.status_code,
                     "method": request.method,
@@ -195,29 +167,28 @@ class AuditLoggingMiddleware(BaseHTTPMiddleware):
                 }
             )
         except Exception as e:
-            logger.error(f"Failed to log prediction event: {e}")
+            logger.debug(f"Prediction audit logging failed (non-critical): {e}")
     
     async def _log_model_management(self, request: Request, response: Response, user_id: str, ip_address: str):
-        """Log model management events"""
+        """Log model management events - SAFE AND NON-BLOCKING"""
         try:
             model_name = request.path_params.get("model_name", "unknown")
             operation = "updated" if request.method == "PUT" else "deleted"
             
-            event_type = f"model_{operation}" if response.status_code == 200 else f"model_{operation}_failed"
-            
-            await self.audit_logger.log_model_event(
-                event_type=event_type,
-                model_name=model_name,
+            from services.audit_logger import AuditEventType
+            await self.audit_logger.log_event(
+                event_type=AuditEventType.ADMIN_ACTION,  # Use ADMIN_ACTION for model management
                 user_id=user_id,
-                ip_address=ip_address,
-                metadata={
+                resource=f"model:{model_name}",
+                action=operation,
+                details={
                     "endpoint": request.url.path,
                     "status_code": response.status_code,
                     "method": request.method
                 }
             )
         except Exception as e:
-            logger.error(f"Failed to log model management event: {e}")
+            logger.debug(f"Model management audit logging failed (non-critical): {e}")
 
 # Global audit logger instance
-audit_logger = AuditLogger()
+audit_logger = ServiceAuditLogger()

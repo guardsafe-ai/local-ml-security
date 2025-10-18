@@ -6,7 +6,7 @@ Model management and information endpoints
 import logging
 from typing import List, Dict, Any
 from datetime import datetime
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from models.responses import ModelListResponse, ModelRegistryResponse, ModelVersionsResponse, ModelInfo
 from services.model_trainer import ModelTrainer
 from services.mlflow_service import MLflowService
@@ -280,4 +280,91 @@ async def get_model_stages(model_name: str):
         }
     except Exception as e:
         logger.error(f"Failed to get model stages for {model_name}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/experiments/analytics")
+async def get_experiment_analytics():
+    """Get comprehensive experiment analytics across all models"""
+    try:
+        from mlflow_integration import mlflow_integration
+        
+        analytics = mlflow_integration.get_experiment_analytics()
+        return analytics
+        
+    except Exception as e:
+        logger.error(f"Failed to get experiment analytics: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/experiments/compare")
+async def compare_model_experiments(model_names: str = Query(..., description="Comma-separated list of model names")):
+    """Compare experiments across different models"""
+    try:
+        from mlflow_integration import mlflow_integration
+        
+        model_list = [name.strip() for name in model_names.split(",")]
+        comparison = mlflow_integration.compare_model_experiments(model_list)
+        
+        return {
+            "comparison": comparison,
+            "models_compared": model_list,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to compare model experiments: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/experiments/{model_name}/runs")
+async def get_model_experiment_runs(
+    model_name: str,
+    limit: int = Query(10, description="Maximum number of runs to return")
+):
+    """Get runs for a specific model's experiment"""
+    try:
+        from mlflow_integration import mlflow_integration
+        from mlflow.tracking import MlflowClient
+        
+        client = MlflowClient()
+        experiment_name = f"security_{model_name}_experiments"
+        
+        try:
+            experiment = client.get_experiment_by_name(experiment_name)
+            if not experiment:
+                raise HTTPException(status_code=404, detail=f"Experiment not found: {experiment_name}")
+            
+            runs = client.search_runs(
+                experiment_ids=[experiment.experiment_id],
+                order_by=["start_time DESC"],
+                max_results=limit
+            )
+            
+            run_data = []
+            for run in runs:
+                run_data.append({
+                    "run_id": run.info.run_id,
+                    "run_name": run.data.tags.get("mlflow.runName", ""),
+                    "start_time": run.info.start_time,
+                    "end_time": run.info.end_time,
+                    "status": run.info.status,
+                    "metrics": run.data.metrics,
+                    "parameters": run.data.params,
+                    "tags": run.data.tags
+                })
+            
+            return {
+                "model_name": model_name,
+                "experiment_name": experiment_name,
+                "experiment_id": experiment.experiment_id,
+                "runs": run_data,
+                "total_runs": len(run_data)
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to get experiment runs for {model_name}: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get model experiment runs: {e}")
         raise HTTPException(status_code=500, detail=str(e))
